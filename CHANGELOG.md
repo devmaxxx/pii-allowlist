@@ -14,4 +14,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `pii-allowlist/pino`: `createLogFormatter`, `createMessageSerializer`, `createRequestSerializer`, `responseSerializer` and `DEFAULT_LOG_KEYS`.
 - `pii-allowlist/sentry`: `createBeforeSend`, `createBeforeBreadcrumb` and `DEFAULT_SENTRY_KEYS`. Covers `extra`, breadcrumbs, `logentry` and the local variables of exception and thread stack frames. Typed structurally, with no peer dependency.
 
-[0.1.0]: https://github.com/arenuzzz/pii-allowlist/releases/tag/v0.1.0
+[0.1.0]: https://github.com/devmaxxx/pii-allowlist/releases/tag/v0.1.0

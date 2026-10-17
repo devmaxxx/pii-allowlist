@@ -6,12 +6,12 @@
   "description": "Allowlist, don't denylist: keep PII out of logs, traces and error reports. Zero-dependency core with pino, OpenTelemetry and Sentry adapters",
   "author": "arenuzzz",
   "license": "MIT",
-  "homepage": "https://github.com/arenuzzz/pii-allowlist#readme",
+  "homepage": "https://github.com/devmaxxx/pii-allowlist#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arenuzzz/pii-allowlist.git"
+    "url": "git+https://github.com/devmaxxx/pii-allowlist.git"
   },
-  "bugs": "https://github.com/arenuzzz/pii-allowlist/issues",
+  "bugs": "https://github.com/devmaxxx/pii-allowlist/issues",
   "keywords": [
     "pii",
     "gdpr",

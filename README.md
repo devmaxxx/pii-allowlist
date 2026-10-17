@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
 [![npm downloads](https://img.shields.io/npm/dm/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
-[![CI](https://github.com/arenuzzz/pii-allowlist/actions/workflows/ci.yml/badge.svg)](https://github.com/arenuzzz/pii-allowlist/actions/workflows/ci.yml)
+[![CI](https://github.com/devmaxxx/pii-allowlist/actions/workflows/ci.yml/badge.svg)](https://github.com/devmaxxx/pii-allowlist/actions/workflows/ci.yml)
 [![types](https://img.shields.io/npm/types/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
 [![core dependencies](https://img.shields.io/badge/core%20dependencies-0-brightgreen)](./package.json)
 [![bundle size](https://img.shields.io/bundlephobia/minzip/pii-allowlist)](https://bundlephobia.com/package/pii-allowlist)
@@ -267,7 +267,7 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 
 ## Contributing
 
-Issues and pull requests are welcome at [github.com/arenuzzz/pii-allowlist](https://github.com/arenuzzz/pii-allowlist).
+Issues and pull requests are welcome at [github.com/devmaxxx/pii-allowlist](https://github.com/devmaxxx/pii-allowlist).
 
 ```sh
 pnpm install
