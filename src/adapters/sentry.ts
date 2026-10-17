@@ -87,25 +87,20 @@ function redactRecordWithUrls(record: Record<string, unknown>, { allowlist, reda
 }
 
 /**
- * A message is a URL only when it starts with `/` or parses as an absolute one: the path redactor
- * cuts at the first `?` or `#`, which would truncate a CSS selector or a question.
+ * Only whitespace-delimited words that start with `/` or a scheme are URLs: the path redactor cuts
+ * at the first `?` or `#`, which would truncate a CSS selector or a question elsewhere in the text.
  */
-function isUrl(text: string): boolean {
-  if (text.startsWith('/'))
-    return true
-  try {
-    return Boolean(new URL(text))
-  }
-  catch {
-    return false
-  }
+const URL_WORD = /(^|\s)((?:[a-z][\d+.a-z-]*:\/\/|\/)\S*)/gi
+
+function redactUrlWords(text: string, redactPath: (url: string) => string): string {
+  return text.replace(URL_WORD, (_, lead: string, url: string) => lead + redactPath(url))
 }
 
 /**
  * A breadcrumb as it may be reported. Console breadcrumbs (`category: 'console'`) and debug ones
  * lose their message and data whole, because they hold whatever the app logged. Any other keeps
- * its allowlisted `data`, with URLs path-redacted, and its message scrubbed, path-redacted when it
- * is a URL.
+ * its allowlisted `data`, with URLs path-redacted, and its message scrubbed, with every URL in it
+ * path-redacted.
  */
 function scrubBreadcrumb<B extends BreadcrumbLike>(crumb: B, scrubbers: Scrubbers): B {
   if (crumb.category === 'console' || crumb.type === 'debug')
@@ -116,8 +111,7 @@ function scrubBreadcrumb<B extends BreadcrumbLike>(crumb: B, scrubbers: Scrubber
   if (crumb.data !== undefined)
     next.data = redactRecordWithUrls(crumb.data, scrubbers)
   if (typeof crumb.message === 'string') {
-    const message = isUrl(crumb.message) ? redactPath(crumb.message) : crumb.message
-    next.message = allowlist.scrubText(message)
+    next.message = allowlist.scrubText(redactUrlWords(crumb.message, redactPath))
   }
   return next
 }

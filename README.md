@@ -261,7 +261,7 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 - **pino bindings are not walked.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings. Keep personal data out of bindings, or filter them with `formatters.bindings`.
 - **Sentry `tags` and `contexts` are not walked**, because the SDK fills them with runtime and trace data.
 - **Span resources are filtered, not scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and their values are passed as they are: a service name built from a customer name still leaks.
-- **Breadcrumb messages are URLs only by shape.** A message that is not one, such as `GET /reset/s3cr3t?email=…` in prose, is text-scrubbed but not path-redacted, so its query string stays.
+- **URLs in breadcrumb messages are found by shape.** Only whitespace-delimited words starting with `/` or a scheme (`https://…`) are path-redacted; a URL glued to other text, such as `url=/reset/s3cr3t`, is text-scrubbed only.
 - **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.
 
 ## Contributing

@@ -160,6 +160,12 @@ describe('createBeforeBreadcrumb: a message that is not a URL', () => {
       'https://x.tld/guest-form/[token]',
     )
   })
+
+  it('path-redacts a URL inside prose', () => {
+    expect(beforeBreadcrumb({ category: 'app', message: 'GET /guest-form/T1?code=s3cr3t failed' }).message).toBe(
+      'GET /guest-form/[token] failed',
+    )
+  })
 })
 
 describe('createBeforeSend: logentry and stack frame locals', () => {
