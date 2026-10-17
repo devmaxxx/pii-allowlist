@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.23.0",
   "description": "Allowlist, don't denylist: keep PII out of logs, traces and error reports. Zero-dependency core with pino, OpenTelemetry and Sentry adapters",
-  "author": "arenuzzz",
+  "author": "Maksym Synenko (https://github.com/devmaxxx)",
   "license": "MIT",
   "homepage": "https://github.com/devmaxxx/pii-allowlist#readme",
   "repository": {
