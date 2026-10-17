@@ -12,9 +12,39 @@
 [![bundle size](https://img.shields.io/bundlephobia/minzip/pii-allowlist)](https://bundlephobia.com/package/pii-allowlist)
 [![license](https://img.shields.io/npm/l/pii-allowlist)](./LICENSE)
 
+[Install](#install) · [Quick start](#quick-start) · [OpenTelemetry](#opentelemetry) · [pino](#pino) · [Sentry](#sentry) · [API](#api) · [Limits](#limits)
+
 </div>
 
 A value leaves your process only when its key is on a list you wrote. Everything else becomes `[redacted]`. One dependency-free core, plus thin adapters for [OpenTelemetry](https://opentelemetry.io/), [pino](https://getpino.io/) and [Sentry](https://sentry.io/).
+
+```mermaid
+flowchart LR
+  app["your code<br/>logs · spans · errors"] --> hook["adapter<br/>formatter · exporter · beforeSend"]
+  hook --> keys{"key on<br/>the list?"}
+  keys -- no --> red["[redacted]"]
+  keys -- yes --> text["text patterns<br/>e-mail · phone · card · token"]
+  text --> out["pino · OTLP · Sentry"]
+  red --> out
+```
+
+<details>
+<summary><strong>Contents</strong></summary>
+
+- [Why allowlist](#why-allowlist)
+- [Features](#features)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [OpenTelemetry](#opentelemetry) · [logs](#opentelemetry-logs)
+- [pino](#pino)
+- [Sentry](#sentry)
+- [API](#api) · [Defaults](#defaults)
+- [Compared with](#compared-with)
+- [Limits](#limits)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
 
 ## Why allowlist
 
@@ -205,6 +235,9 @@ Console and debug breadcrumbs lose their message and data. All helpers are typed
 
 ### `pii-allowlist`
 
+<details open>
+<summary>Exports</summary>
+
 **`createAllowlist(options): Allowlist`**
 
 | Option | Type | Default | |
@@ -238,7 +271,12 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.ipv4, TEXT_PATTERNS.ipv6] })
 ```
 
+</details>
+
 ### `pii-allowlist/otel`
+
+<details>
+<summary>Exports</summary>
 
 | Export | |
 | --- | --- |
@@ -249,7 +287,12 @@ createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.i
 | `DEFAULT_SPAN_ATTRIBUTES` | Default attribute keys. |
 | `DEFAULT_RESOURCE_ATTRIBUTES` | Default resource attribute keys. |
 
+</details>
+
 ### `pii-allowlist/otel-logs`
+
+<details>
+<summary>Exports</summary>
 
 | Export | |
 | --- | --- |
@@ -257,7 +300,12 @@ createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.i
 | `allowlistLogRecord(record, allowlist, resourceAllowlist?)` | The copy of one record the exporter forwards. |
 | `DEFAULT_LOG_ATTRIBUTES` | Default attribute keys. |
 
+</details>
+
 ### `pii-allowlist/pino`
+
+<details>
+<summary>Exports</summary>
 
 | Export | Options | |
 | --- | --- | --- |
@@ -268,7 +316,12 @@ createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.i
 | `allowlistChildBindings(logger, options?)` | `allowlist` (default `DEFAULT_LOG_KEYS`) | the same logger, whose `child()` bindings are walked, for every descendant |
 | `DEFAULT_LOG_KEYS` | | Default log keys. |
 
+</details>
+
 ### `pii-allowlist/sentry`
+
+<details>
+<summary>Exports</summary>
 
 | Export | Options | |
 | --- | --- | --- |
@@ -279,7 +332,12 @@ createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.i
 | `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data`, event `extra`, stack frame `vars` and log attribute keys. |
 | `DEFAULT_SENTRY_SPAN_ATTRIBUTES` | | Default span attribute keys. |
 
+</details>
+
 ### Defaults
+
+<details>
+<summary>What each default list keeps and leaves out</summary>
 
 | List | Contents | Left out on purpose |
 | --- | --- | --- |
@@ -289,6 +347,8 @@ createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.i
 | `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `cause`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
 | `DEFAULT_SENTRY_KEYS` | `method`, `url`, `from`, `to`, `status_code`, `request_body_size`, `response_body_size` | request bodies |
 | `DEFAULT_SENTRY_SPAN_ATTRIBUTES` | `DEFAULT_SPAN_ATTRIBUTES`, plus `sentry.op`, `origin`, `source`, `sample_rate`, `segment.id`, `segment.name` (path-redacted), `release`, `environment`, `sdk.name`, `sdk.version` | `user.*`, and what `DEFAULT_SPAN_ATTRIBUTES` leaves out |
+
+</details>
 
 ## Compared with
 
@@ -313,7 +373,7 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 - **pino child bindings need the wrapper.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings; wrap the root logger with `allowlistChildBindings`. Base bindings (`pid`, `hostname`, `base`) are not walked.
 - **Sentry `tags` and `contexts` are not walked**, except `contexts.trace.data`, because the SDK fills them with runtime and trace data.
 - **SQL literals are found by shape.** A database span name loses `'quoted'` strings and numbers and `$$dollar-quoted$$` strings; when a backslash or an unpaired quote makes the strings ambiguous, everything from the first quote on is cut. A `"double-quoted"` value is kept, because standard SQL quotes identifiers that way: MySQL and SQLite string literals written so leak.
-- **Span resources are filtered, then text-scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and only e-mail addresses and phone numbers are cut from their values: a service name built from a customer name still leaks.
+- **Span resources are filtered, then text-scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and only the text patterns are cut from their values: a service name built from a customer name still leaks.
 - **URLs in breadcrumb messages are found by shape.** Only whitespace-delimited words starting with `/` or a scheme (`https://…`) are path-redacted; a URL glued to other text, such as `url=/reset/s3cr3t`, is text-scrubbed only.
 - **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.
 
