@@ -224,3 +224,24 @@ describe('allowlistSpan: text inside allowlisted attributes', () => {
     expect(span?.attributes).toEqual({ 'messaging.destination.name': 'inbox of [redacted]', 'tenant.tags': ['vip', '[redacted]'] })
   })
 })
+
+describe('AllowlistSpanExporter: a span it cannot copy', () => {
+  it('fails the export instead of forwarding the span unfiltered', () => {
+    const forwarded: unknown[] = []
+    const results: { code: number }[] = []
+    const exporter = new AllowlistSpanExporter({
+      export: spans => forwarded.push(...spans),
+      shutdown: async () => {},
+    })
+    const span = Object.defineProperty({}, 'attributes', {
+      get: () => {
+        throw new Error('hostile')
+      },
+    }) as ReadableSpan
+
+    exporter.export([span], result => results.push(result))
+
+    expect(forwarded).toEqual([])
+    expect(results).toMatchObject([{ code: 1 }])
+  })
+})

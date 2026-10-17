@@ -298,6 +298,16 @@ describe('createBeforeSendSpan', () => {
     expect(beforeSendSpan({ name, op: 'db' }).name).toBe(expected)
   })
 
+  it('cuts literals from a streamed database span known only by its sentry.op', () => {
+    const out = beforeSendSpan({ name: `SELECT * FROM u WHERE name = 'Jane Roe'`, attributes: { 'sentry.op': 'db.query' } })
+    expect(out.name).toBe('SELECT * FROM u WHERE name = ?')
+  })
+
+  it('cuts a dollar-quoted literal, keeping $1 placeholders', () => {
+    const out = beforeSendSpan({ name: `UPDATE t SET note = $$Jane's note$$, tag = $x$secret$x$ WHERE id = $1`, op: 'db' })
+    expect(out.name).toBe('UPDATE t SET note = ?, tag = ? WHERE id = $1')
+  })
+
   it('keeps an identifier that ends in a digit', () => {
     const out = beforeSendSpan({ name: 'SELECT col1 FROM table2', op: 'db.query', data: {} })
     expect(out.name).toBe('SELECT col1 FROM table2')

@@ -1,6 +1,7 @@
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base'
 import type { Allowlist } from '../allowlist'
 import { createAllowlist } from '../allowlist'
+import { failedExport, pickScrubbed } from './attributes'
 import { DEFAULT_SPAN_ATTRIBUTES } from './semconv'
 
 export { DEFAULT_SPAN_ATTRIBUTES }
@@ -53,24 +54,12 @@ export function safeSpanName(name: string, attributes: Readonly<Record<string, u
   return query === -1 ? name : name.slice(0, query)
 }
 
-/** The allowlisted attributes, with the text patterns scrubbed out of every string they carry. */
-function pickAttributes<A extends Readonly<Record<string, unknown>>>(attributes: A, allowlist: Allowlist): A {
-  const kept = allowlist.pick(attributes) as Record<string, unknown>
-  for (const [key, value] of Object.entries(kept)) {
-    if (typeof value === 'string')
-      kept[key] = allowlist.scrubText(value)
-    else if (Array.isArray(value))
-      kept[key] = value.map(item => typeof item === 'string' ? allowlist.scrubText(item) : item)
-  }
-  return kept as A
-}
-
 /**
  * A copy of `resource` carrying only the attributes `allowlist` names, text-scrubbed. `merge`
  * filters its result too, so nothing downstream can bring a dropped attribute back.
  */
 export function allowlistResource(resource: Resource, allowlist: Allowlist = defaultResourceAllowlist): Resource {
-  const attributes = pickAttributes(resource.attributes, allowlist)
+  const attributes = pickScrubbed(resource.attributes, allowlist)
   return {
     attributes,
     ...(resource.schemaUrl === undefined ? {} : { schemaUrl: resource.schemaUrl }),
@@ -92,7 +81,7 @@ export function allowlistSpan(
   allowlist: Allowlist,
   resourceAllowlist: Allowlist = defaultResourceAllowlist,
 ): ReadableSpan {
-  const attributes = pickAttributes(span.attributes, allowlist)
+  const attributes = pickScrubbed(span.attributes, allowlist)
   const removed = Object.keys(span.attributes).length - Object.keys(attributes).length
 
   return {
@@ -133,7 +122,15 @@ export class AllowlistSpanExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: ExportCallback): void {
-    this.next.export(spans.map(span => allowlistSpan(span, this.allowlist, this.resourceAllowlist)), resultCallback)
+    let copies: ReadableSpan[]
+    try {
+      copies = spans.map(span => allowlistSpan(span, this.allowlist, this.resourceAllowlist))
+    }
+    catch (error) {
+      resultCallback(failedExport(error))
+      return
+    }
+    this.next.export(copies, resultCallback)
   }
 
   shutdown(): Promise<void> {

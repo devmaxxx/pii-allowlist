@@ -34,10 +34,10 @@ The same pino call, `logger.info({ userId, email, taxId, shippingAddress }, 'sig
 ## Features
 
 - **Default deny.** A key not named by `keys` or `patterns` is redacted, subtree and all, at every depth.
-- **Text scrubbing.** E-mail addresses and international phone numbers (`+1 (415) 555-0123` as well as `+14155550123`) are cut out of every string that survives, in logs, span attributes and names, and Sentry events alike, so an allowlisted `message` built by interpolation stays clean.
+- **Text scrubbing.** E-mail addresses, international phone numbers (`+1 (415) 555-0123` as well as `+14155550123`), payment card numbers that pass the Luhn check, JSON Web Tokens and `Bearer`/`Basic` credentials are cut out of every string that survives, in logs, span attributes and names, and Sentry events alike, so an allowlisted `message` built by interpolation stays clean.
 - **URL redaction.** Query strings and fragments are always dropped; secret path segments (`/reset/:token`) are replaced.
 - **Safe walk.** Inputs are never mutated; cycles become `[circular]`; depth is capped; errors are walked as `{ type, message, stack, ... }`; maps, sets and buffers are replaced whole; a `__proto__` key is copied as data; a getter that throws yields `[redacted]` instead of an exception.
-- **Adapters** for an OpenTelemetry `SpanExporter`; pino `formatters.log`, serializers and child bindings; and Sentry `beforeSend`, `beforeSendTransaction`, `beforeSendSpan`, `beforeSendLog` and `beforeBreadcrumb`.
+- **Adapters** for an OpenTelemetry `SpanExporter` and `LogRecordExporter`; pino `formatters.log`, serializers and child bindings; and Sentry `beforeSend`, `beforeSendTransaction`, `beforeSendSpan`, `beforeSendLog` and `beforeBreadcrumb`.
 - **Zero dependencies in the core.** Each adapter's framework is an optional peer. ESM only, typed, `sideEffects: false`.
 
 ## Install
@@ -55,6 +55,7 @@ Requires Node 20 or newer. The build is platform-neutral. Add the peer for each 
 | --- | --- | --- |
 | `pii-allowlist` | the core | none |
 | `pii-allowlist/otel` | trace exporters | `@opentelemetry/sdk-trace-base` >= 2 |
+| `pii-allowlist/otel-logs` | log record exporters | `@opentelemetry/sdk-logs` >= 0.200 |
 | `pii-allowlist/pino` | log lines | `pino` >= 8 |
 | `pii-allowlist/sentry` | error events and breadcrumbs | none: typed structurally, fits any Sentry SDK >= 8 |
 
@@ -93,6 +94,8 @@ The wrapped exporter receives a copy of each span; the spans the rest of the pip
 - events, including recorded exceptions, are dropped; links lose their attributes; the status loses its message;
 - an HTTP span is renamed `METHOD /route/{template}` (or `METHOD` when no route matched); any other name loses its query string.
 
+If a span cannot be copied (a getter throws), the batch fails with `ExportResultCode.FAILED` instead of being forwarded unfiltered. The log exporter below does the same.
+
 To allow more attributes:
 
 ```ts
@@ -104,6 +107,18 @@ const allowlisted = new AllowlistSpanExporter(exporter, {
   resourceAllowlist: createAllowlist({ keys: [...DEFAULT_RESOURCE_ATTRIBUTES, 'cloud.region'] }),
 })
 ```
+
+### OpenTelemetry logs
+
+```ts
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto'
+import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs'
+import { AllowlistLogRecordExporter } from 'pii-allowlist/otel-logs'
+
+const processor = new BatchLogRecordProcessor({ exporter: new AllowlistLogRecordExporter(new OTLPLogExporter()) })
+```
+
+(Older `@opentelemetry/sdk-logs` releases take the exporter itself: `new BatchLogRecordProcessor(exporter)`.) The exported copy redacts attributes not on the list (default `DEFAULT_LOG_ATTRIBUTES`: `DEFAULT_LOG_KEYS` plus `exception.type`, `exception.message` and `exception.stacktrace`), keeping their keys so a missing one shows up as `[redacted]`; scrubs a string body and walks a structured one; and filters the resource as the span exporter does. This is the place to filter logs that reach OpenTelemetry without passing through pino's formatters.
 
 ## pino
 
@@ -197,7 +212,7 @@ Console and debug breadcrumbs lose their message and data. All helpers are typed
 | `keys` | `Iterable<string>` | required | Keys allowed at any depth, matched exactly. |
 | `patterns` | `Iterable<RegExp>` | `[]` | A key matching any pattern is allowed, e.g. `/Id$/`. |
 | `redactWith` | `string \| (key, value) => unknown` | `'[redacted]'` | What a non-allowlisted value becomes. |
-| `textPatterns` | `Iterable<RegExp>` | `DEFAULT_TEXT_PATTERNS` | Cut out of every surviving string; `[]` keeps strings verbatim. |
+| `textPatterns` | `Iterable<RegExp \| TextMatcher>` | `DEFAULT_TEXT_PATTERNS` | Cut out of every surviving string; `[]` keeps strings verbatim. A `TextMatcher` is `{ pattern, accept(match) }`: only matches `accept` returns `true` for are cut. |
 | `maxDepth` | `number` | `8` | Objects nested deeper are replaced whole. The top-level record is depth 0. |
 
 The returned `Allowlist` is pure; no method mutates its input.
@@ -217,7 +232,11 @@ The returned `Allowlist` is pure; no method mutates its input.
 | `tokens` | `string[]` | `[]` | Route templates with a `:token` segment, e.g. `'/invite/:token/accept'`. A template without one throws. |
 | `placeholder` | `string` | `'[token]'` | What a token segment becomes. |
 
-Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TEXT_PATTERNS`.
+Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TEXT_PATTERNS`, and `TEXT_PATTERNS`, every shape this package knows by name (`email`, `phone`, `card`, `jwt`, `bearer`, `basic`, `ipv4`, `ipv6`). IP addresses are not scrubbed by default; opt in with:
+
+```ts
+createAllowlist({ keys, textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.ipv4, TEXT_PATTERNS.ipv6] })
+```
 
 ### `pii-allowlist/otel`
 
@@ -229,6 +248,14 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | `safeSpanName(name, attributes)` | The name a span is exported with. |
 | `DEFAULT_SPAN_ATTRIBUTES` | Default attribute keys. |
 | `DEFAULT_RESOURCE_ATTRIBUTES` | Default resource attribute keys. |
+
+### `pii-allowlist/otel-logs`
+
+| Export | |
+| --- | --- |
+| `new AllowlistLogRecordExporter(next, { allowlist?, resourceAllowlist? })` | `LogRecordExporter` that forwards allowlisted copies of log records to `next`. |
+| `allowlistLogRecord(record, allowlist, resourceAllowlist?)` | The copy of one record the exporter forwards. |
+| `DEFAULT_LOG_ATTRIBUTES` | Default attribute keys. |
 
 ### `pii-allowlist/pino`
 
@@ -256,7 +283,7 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 
 | List | Contents | Left out on purpose |
 | --- | --- | --- |
-| `DEFAULT_TEXT_PATTERNS` | e-mail addresses, international phone numbers (`+` and 8 to 15 digits, optionally grouped by spaces, dots, dashes or parentheses) | numbers without a leading `+`, which cannot be told from IDs and amounts |
+| `DEFAULT_TEXT_PATTERNS` | e-mail addresses; international phone numbers (`+` and 8 to 15 digits, optionally grouped by spaces, dots, dashes or parentheses); card numbers (13 to 19 digits passing the Luhn check); JSON Web Tokens; credentials after `Bearer` or `Basic` | phone numbers without a leading `+`, which cannot be told from IDs and amounts; IPv4 and IPv6 addresses, which version numbers and times resemble (`TEXT_PATTERNS.ipv4`, `.ipv6`) |
 | `DEFAULT_SPAN_ATTRIBUTES` | HTTP method, route, status code, protocol version; `server.address`/`port`; `db.system`, operation, name/namespace; `messaging.system`, destination name, operation; `error.type`. Stable and older semantic-convention names. | `url.*`, `http.target`, `http.url`, `db.statement`, `db.query.text`, `client.address`, `user_agent.original`, headers |
 | `DEFAULT_RESOURCE_ATTRIBUTES` | `service.name`, `service.version`, `service.namespace`, `deployment.environment`, `deployment.environment.name`, `telemetry.sdk.name`, `telemetry.sdk.language`, `telemetry.sdk.version` | `host.*`, `process.*`, `container.*`, cloud account IDs |
 | `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `cause`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
@@ -279,12 +306,13 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 
 ## Limits
 
-- **Keys, not values.** An allowlisted key carries whatever value it is given. The default text patterns catch only e-mail addresses and international phone numbers; they cannot recognise a name, a street address or a national ID. Keep free-text keys off the list, or add `textPatterns` for your own formats.
+- **Keys, not values.** An allowlisted key carries whatever value it is given. The default text patterns catch e-mail addresses, phone numbers, card numbers and tokens; they cannot recognise a name, a street address or a national ID. Keep free-text keys off the list, or add `textPatterns` for your own formats.
 - **Patterns are broad.** `/Id$/` also admits `taxId`. Prefer exact keys.
+- **Card numbers are found by checksum.** One in ten digit strings of card length passes the Luhn check, so a long numeric ID inside a string is sometimes redacted.
 - **Depth cap.** Objects nested deeper than `maxDepth` (default 8) are replaced whole, allowlisted or not.
 - **pino child bindings need the wrapper.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings; wrap the root logger with `allowlistChildBindings`. Base bindings (`pid`, `hostname`, `base`) are not walked.
 - **Sentry `tags` and `contexts` are not walked**, except `contexts.trace.data`, because the SDK fills them with runtime and trace data.
-- **SQL literals are found by shape.** A database span name loses `'quoted'` strings and numbers; when a backslash or an unpaired quote makes the strings ambiguous, everything from the first quote on is cut. An identifier quoted with `"` is kept, as are literals a dialect writes some other way (`$$dollar-quoted$$` strings).
+- **SQL literals are found by shape.** A database span name loses `'quoted'` strings and numbers and `$$dollar-quoted$$` strings; when a backslash or an unpaired quote makes the strings ambiguous, everything from the first quote on is cut. A `"double-quoted"` value is kept, because standard SQL quotes identifiers that way: MySQL and SQLite string literals written so leak.
 - **Span resources are filtered, then text-scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and only e-mail addresses and phone numbers are cut from their values: a service name built from a customer name still leaks.
 - **URLs in breadcrumb messages are found by shape.** Only whitespace-delimited words starting with `/` or a scheme (`https://…`) are path-redacted; a URL glued to other text, such as `url=/reset/s3cr3t`, is text-scrubbed only.
 - **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.

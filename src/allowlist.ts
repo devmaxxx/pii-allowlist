@@ -1,20 +1,11 @@
+import type { TextPattern } from './text'
+import { compileTextPattern, DEFAULT_TEXT_PATTERNS } from './text'
+
 /** The placeholder a value takes when its key is not on the allowlist. */
 export const REDACTED = '[redacted]'
 
 /** What a reference back to one of its own ancestors is written as. */
 export const CIRCULAR = '[circular]'
-
-/**
- * Text shapes scrubbed from every string an allowlisted key carries: an e-mail address and an
- * international phone number. A key on the list says its value is safe to log; these catch the
- * message somebody built by interpolating one into it anyway. A phone number starts with `+` and
- * has 8 to 15 digits, which may be grouped by spaces, dots, dashes or parentheses, as people
- * write them: `+14155550123`, `+1 (415) 555-0123`, `+44 20 7946 0958`.
- */
-export const DEFAULT_TEXT_PATTERNS: readonly RegExp[] = [
-  /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}.-]{1,253}\.\p{L}{2,}/gu,
-  /\+\d(?:[ .()-]{0,2}\d){7,14}\b/g,
-]
 
 const DEFAULT_MAX_DEPTH = 8
 
@@ -38,7 +29,7 @@ export interface AllowlistOptions {
    * Patterns cut out of every string that survives the walk, replaced with {@link REDACTED}.
    * Defaults to {@link DEFAULT_TEXT_PATTERNS}; pass `[]` to keep strings verbatim.
    */
-  textPatterns?: Iterable<RegExp>
+  textPatterns?: Iterable<TextPattern>
   /**
    * Objects nested deeper than this are replaced whole, allowlisted or not. Defaults to 8; the
    * top-level record is depth 0.
@@ -78,7 +69,7 @@ export interface Allowlist {
 export function createAllowlist(options: AllowlistOptions): Allowlist {
   const keys = new Set(options.keys)
   const patterns = [...(options.patterns ?? [])].map(withoutStatefulFlags)
-  const textPatterns = [...(options.textPatterns ?? DEFAULT_TEXT_PATTERNS)].map(withGlobalFlag)
+  const textPatterns = [...(options.textPatterns ?? DEFAULT_TEXT_PATTERNS)].map(compileTextPattern)
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const redactValue = toRedactFn(options.redactWith)
 
@@ -88,8 +79,11 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
 
   function scrubText(text: string): string {
     let scrubbed = text
-    for (const pattern of textPatterns)
-      scrubbed = scrubbed.replace(pattern, REDACTED)
+    for (const { pattern, accept } of textPatterns) {
+      scrubbed = accept === undefined
+        ? scrubbed.replace(pattern, REDACTED)
+        : scrubbed.replace(pattern, match => accept(match) ? REDACTED : match)
+    }
     return scrubbed
   }
 
@@ -182,10 +176,6 @@ function toRedactFn(redactWith: string | RedactFn = REDACTED): RedactFn {
 /** Key patterns are tested once per key, so a `g` or `y` flag would make `lastIndex` skip matches. */
 function withoutStatefulFlags(pattern: RegExp): RegExp {
   return new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''))
-}
-
-function withGlobalFlag(pattern: RegExp): RegExp {
-  return pattern.global ? pattern : new RegExp(pattern.source, `${pattern.flags}g`)
 }
 
 function isOpaque(value: object): boolean {

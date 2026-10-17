@@ -2,6 +2,7 @@ import type { Allowlist } from '../allowlist'
 import type { PathRedactor } from '../path'
 import { createAllowlist } from '../allowlist'
 import { createPathRedactor } from '../path'
+import { attributeValue, pickScrubbed } from './attributes'
 import { DEFAULT_SPAN_ATTRIBUTES } from './semconv'
 
 /**
@@ -289,36 +290,16 @@ function withScrubbedStacktrace<T extends { stacktrace?: StacktraceLike }>(owner
   return { ...owner, stacktrace: { ...owner.stacktrace, frames: scrubbed } }
 }
 
-/** Streamed attributes may be wrapped as `{ value, unit }`. */
-function attributeValue(value: unknown): unknown {
-  return typeof value === 'object' && value !== null && 'value' in value ? value.value : value
-}
-
 function stringAttribute(attributes: Record<string, unknown>, key: string): string | undefined {
   const value = attributeValue(attributes[key])
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
-function scrubAttributeValue(value: unknown, scrub: (text: string) => string): unknown {
-  if (typeof value === 'string')
-    return scrub(value)
-  if (Array.isArray(value))
-    return value.map(item => typeof item === 'string' ? scrub(item) : item)
-  if (typeof value === 'object' && value !== null && 'value' in value)
-    return { ...value, value: scrubAttributeValue(value.value, scrub) }
-  return value
-}
-
 /** Non-allowlisted span attributes are dropped, as the OpenTelemetry exporter drops them. */
 function scrubSpanAttributes(attributes: Record<string, unknown>, scrubbers: Scrubbers): Record<string, unknown> {
-  const kept = scrubbers.spanAllowlist.pick(attributes)
-  for (const [key, value] of Object.entries(kept)) {
-    const scrub = key === 'sentry.segment.name'
-      ? (text: string) => scrubUrl(text, scrubbers)
-      : scrubbers.allowlist.scrubText
-    kept[key] = scrubAttributeValue(value, scrub)
-  }
-  return kept
+  return pickScrubbed(attributes, scrubbers.spanAllowlist, key => key === 'sentry.segment.name'
+    ? text => scrubUrl(text, scrubbers)
+    : scrubbers.allowlist.scrubText)
 }
 
 /**
@@ -327,6 +308,8 @@ function scrubSpanAttributes(attributes: Record<string, unknown>, scrubbers: Scr
  */
 const SQL_STRING = /'(?:[^']|'')*'/g
 const SQL_STRING_BACKSLASH_ESCAPED = /'(?:[^'\\]|\\.|'')*'/g
+/** PostgreSQL's `$$text$$` and `$tag$text$tag$`; a `$1` placeholder has no closing `$`. */
+const SQL_DOLLAR_QUOTED = /\$(\w*)\$[\s\S]*?\$\1\$/g
 const SQL_NUMBER = /(?<![\w$.])-?\d+(?:\.\d+)?\b/g
 
 /**
@@ -334,7 +317,8 @@ const SQL_NUMBER = /(?<![\w$.])-?\d+(?:\.\d+)?\b/g
  * does not say which. When the two readings disagree, or a quote is left unpaired (a truncated
  * statement), everything from the first quote on is cut, so no reading leaks a literal's tail.
  */
-function sanitizeSql(statement: string): string {
+function sanitizeSql(sql: string): string {
+  const statement = sql.replace(SQL_DOLLAR_QUOTED, '?')
   const strings = statement.replace(SQL_STRING, '?')
   const firstQuote = statement.indexOf('\'')
   const ambiguous = strings !== statement.replace(SQL_STRING_BACKSLASH_ESCAPED, '?') || strings.includes('\'')
@@ -343,7 +327,7 @@ function sanitizeSql(statement: string): string {
 }
 
 function isDatabaseSpan(op: string | undefined, attributes: Record<string, unknown>): boolean {
-  return op?.startsWith('db') === true
+  return (op ?? stringAttribute(attributes, 'sentry.op'))?.startsWith('db') === true
     || stringAttribute(attributes, 'db.system') !== undefined
     || stringAttribute(attributes, 'db.system.name') !== undefined
 }

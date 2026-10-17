@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CIRCULAR, createAllowlist, REDACTED } from '../src'
+import { CIRCULAR, createAllowlist, DEFAULT_TEXT_PATTERNS, REDACTED, TEXT_PATTERNS } from '../src'
 
 const EMAIL = 'jane.roe@example.com'
 const PHONE = '+15550100200'
@@ -270,5 +270,67 @@ describe('createAllowlist: error causes', () => {
     const allowlist = createAllowlist({ keys: ['err', 'message'] })
 
     expect(allowlist.redact({ err: error })).toMatchObject({ err: { cause: REDACTED } })
+  })
+})
+
+describe('createAllowlist: default text patterns beyond addresses and phones', () => {
+  const allowlist = createAllowlist({ keys: [] })
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1XzEifQ.c2lnbmF0dXJl'
+
+  it.each([
+    ['a card number', 'paid with 4111 1111 1111 1111 ok', `paid with ${REDACTED} ok`],
+    ['a card number written with dashes', 'card 5555-5555-5555-4444', `card ${REDACTED}`],
+    ['a JSON Web Token', `token ${JWT} expired`, `token ${REDACTED} expired`],
+    ['bearer credentials, keeping the scheme', 'Authorization: Bearer abc123.def456', `Authorization: Bearer ${REDACTED}`],
+  ])('scrubs %s', (_name, text, expected) => {
+    expect(allowlist.scrubText(text)).toBe(expected)
+  })
+
+  it('keeps a long digit string that fails the Luhn check', () => {
+    expect(allowlist.scrubText('order 4111111111111112 shipped')).toBe('order 4111111111111112 shipped')
+  })
+
+  it('leaves IP addresses alone unless asked', () => {
+    expect(allowlist.scrubText('from 203.0.113.7')).toBe('from 203.0.113.7')
+  })
+})
+
+describe('createAllowlist: opt-in IP address patterns', () => {
+  const allowlist = createAllowlist({ keys: [], textPatterns: [...DEFAULT_TEXT_PATTERNS, TEXT_PATTERNS.ipv4, TEXT_PATTERNS.ipv6] })
+
+  it.each([
+    ['203.0.113.7', REDACTED],
+    ['2001:db8::8a2e:370:7334', REDACTED],
+    ['2001:0db8:0000:0000:0000:ff00:0042:8329', REDACTED],
+    ['::1', REDACTED],
+    ['v1.2.3.4.5', 'v1.2.3.4.5'],
+    ['12:30:45', '12:30:45'],
+    ['999.1.1.1', '999.1.1.1'],
+  ])('%s becomes %s', (text, expected) => {
+    expect(allowlist.scrubText(text)).toBe(expected)
+  })
+})
+
+describe('createAllowlist: text matchers', () => {
+  it('replaces only the matches a matcher accepts', () => {
+    const allowlist = createAllowlist({ keys: [], textPatterns: [{ pattern: /\d+/, accept: match => Number(match) > 100 }] })
+    expect(allowlist.scrubText('7 of 1234')).toBe(`7 of ${REDACTED}`)
+  })
+})
+
+describe('createAllowlist: review regressions in text patterns', () => {
+  const allowlist = createAllowlist({ keys: [] })
+
+  it('scrubs a card number followed by another number', () => {
+    expect(allowlist.scrubText('card 4111111111111111 5 items')).toBe(`card ${REDACTED} 5 items`)
+  })
+
+  it.each([
+    ['Basic dXNlcjpwYXNz', `Basic ${REDACTED}`],
+    ['Basic authentication failed', 'Basic authentication failed'],
+    ['Basic Settings saved', 'Basic Settings saved'],
+    ['Bearer abcdefgh1234', `Bearer ${REDACTED}`],
+  ])('%s becomes %s', (text, expected) => {
+    expect(allowlist.scrubText(text)).toBe(expected)
   })
 })
