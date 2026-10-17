@@ -55,14 +55,10 @@
   },
   "peerDependencies": {
     "@opentelemetry/sdk-trace-base": ">=2.0.0",
-    "@sentry/core": ">=8.0.0",
     "pino": ">=8.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/sdk-trace-base": {
-      "optional": true
-    },
-    "@sentry/core": {
       "optional": true
     },
     "pino": {
@@ -72,6 +68,7 @@
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
     "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/resources": "^2.12.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@sentry/core": "^11.8.0",
     "@types/node": "^22.20.5",

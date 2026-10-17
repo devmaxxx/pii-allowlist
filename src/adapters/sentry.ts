@@ -4,9 +4,9 @@ import { createAllowlist } from '../allowlist'
 import { createPathRedactor } from '../path'
 
 /**
- * Breadcrumb `data` and event `extra` keys that may be reported: what the SDK's fetch, xhr and
- * navigation breadcrumbs record about a request, minus its body. `url`, `from` and `to` also go
- * through the path redactor.
+ * Breadcrumb `data`, event `extra` and stack frame `vars` keys that may be reported: what the SDK's
+ * fetch, xhr and navigation breadcrumbs record about a request, minus its body. `url`, `from` and
+ * `to` also go through the path redactor.
  */
 export const DEFAULT_SENTRY_KEYS: readonly string[] = [
   'method',
@@ -31,24 +31,34 @@ export interface BreadcrumbLike {
   data?: Record<string, unknown>
 }
 
+/** The parts of a stack trace this module reads; see {@link BreadcrumbLike}. */
+export interface StacktraceLike {
+  frames?: { vars?: Record<string, unknown> }[]
+}
+
 /** The parts of a Sentry event this module reads; see {@link BreadcrumbLike}. */
 export interface SentryEventLike {
   message?: string
+  logentry?: { message?: string, params?: unknown[] }
   transaction?: string
   request?: { url?: string, method?: string }
   user?: unknown
   extra?: Record<string, unknown>
   breadcrumbs?: BreadcrumbLike[]
-  exception?: { values?: { value?: string }[] }
+  exception?: { values?: { value?: string, stacktrace?: StacktraceLike }[] }
+  threads?: { values?: { stacktrace?: StacktraceLike }[] }
 }
 
 export interface SentryScrubOptions {
-  /** Which breadcrumb `data` and event `extra` keys survive. Defaults to {@link DEFAULT_SENTRY_KEYS}. */
+  /**
+   * Which breadcrumb `data`, event `extra` and stack frame `vars` keys survive. Defaults to
+   * {@link DEFAULT_SENTRY_KEYS}.
+   */
   allowlist?: Allowlist
   /**
-   * Applied to every URL: `request.url`, the transaction name, breadcrumb messages and their
-   * `url`, `from` and `to`. Defaults to {@link createPathRedactor}'s, which drops the query and the
-   * fragment; build one with `tokens` to cut secret path segments too.
+   * Applied to every URL: `request.url`, the transaction name, breadcrumb messages that are URLs,
+   * and the `url`, `from` and `to` keys. Defaults to {@link createPathRedactor}'s, which drops the
+   * query and the fragment; build one with `tokens` to cut secret path segments too.
    */
   redactPath?: PathRedactor
 }
@@ -65,20 +75,37 @@ function scrubbersOf(options: SentryScrubOptions): Scrubbers {
   }
 }
 
-function withRedactedUrls(record: Record<string, unknown>, redactPath: PathRedactor): Record<string, unknown> {
-  const copy = { ...record }
+/** Path-redacts after the walk, so a throwing getter is met by the walker, not by a spread. */
+function redactRecordWithUrls(record: Record<string, unknown>, { allowlist, redactPath }: Scrubbers): Record<string, unknown> {
+  const redacted = allowlist.redactRecord(record)
   for (const key of URL_KEYS) {
-    const value = copy[key]
+    const value = redacted[key]
     if (typeof value === 'string')
-      copy[key] = redactPath(value)
+      redacted[key] = redactPath(value)
   }
-  return copy
+  return redacted
+}
+
+/**
+ * A message is a URL only when it starts with `/` or parses as an absolute one: the path redactor
+ * cuts at the first `?` or `#`, which would truncate a CSS selector or a question.
+ */
+function isUrl(text: string): boolean {
+  if (text.startsWith('/'))
+    return true
+  try {
+    return Boolean(new URL(text))
+  }
+  catch {
+    return false
+  }
 }
 
 /**
  * A breadcrumb as it may be reported. Console breadcrumbs (`category: 'console'`) and debug ones
  * lose their message and data whole, because they hold whatever the app logged. Any other keeps
- * its allowlisted `data`, with URLs path-redacted, and a path-redacted message.
+ * its allowlisted `data`, with URLs path-redacted, and its message scrubbed, path-redacted when it
+ * is a URL.
  */
 function scrubBreadcrumb<B extends BreadcrumbLike>(crumb: B, scrubbers: Scrubbers): B {
   if (crumb.category === 'console' || crumb.type === 'debug')
@@ -86,11 +113,12 @@ function scrubBreadcrumb<B extends BreadcrumbLike>(crumb: B, scrubbers: Scrubber
 
   const { allowlist, redactPath } = scrubbers
   const next: B = { ...crumb }
-  if (crumb.data !== undefined) {
-    next.data = allowlist.redactRecord(withRedactedUrls(crumb.data, redactPath))
+  if (crumb.data !== undefined)
+    next.data = redactRecordWithUrls(crumb.data, scrubbers)
+  if (typeof crumb.message === 'string') {
+    const message = isUrl(crumb.message) ? redactPath(crumb.message) : crumb.message
+    next.message = allowlist.scrubText(message)
   }
-  if (typeof crumb.message === 'string')
-    next.message = allowlist.scrubText(redactPath(crumb.message))
   return next
 }
 
@@ -114,9 +142,13 @@ export function createBeforeBreadcrumb(
  *    and env are dropped;
  *  - `user` is dropped;
  *  - `extra` keeps allowlisted keys only, walked deep;
+ *  - the local variables (`vars`) of every exception and thread stack frame keep allowlisted
+ *    names only;
  *  - breadcrumbs are scrubbed as {@link createBeforeBreadcrumb} does;
  *  - the transaction name is path-redacted;
- *  - the message and each exception's value lose the allowlist's text patterns.
+ *  - the message, the `logentry` message and each exception's value lose the allowlist's text
+ *    patterns; `logentry.params` are walked as unnamed values, so strings are scrubbed and
+ *    objects keep allowlisted keys only.
  *
  * `tags` and `contexts` are not touched: the SDK fills them with runtime and trace data.
  *
@@ -137,15 +169,19 @@ export function createBeforeSend(
       next.request = scrubRequest(event.request, redactPath)
     delete next.user
     if (event.extra !== undefined)
-      next.extra = allowlist.redactRecord(withRedactedUrls(event.extra, redactPath))
+      next.extra = redactRecordWithUrls(event.extra, scrubbers)
     if (event.breadcrumbs !== undefined)
       next.breadcrumbs = event.breadcrumbs.map(crumb => scrubBreadcrumb(crumb, scrubbers))
     if (typeof event.transaction === 'string')
       next.transaction = redactPath(event.transaction)
     if (typeof event.message === 'string')
       next.message = allowlist.scrubText(event.message)
+    if (event.logentry !== undefined)
+      next.logentry = scrubLogentry(event.logentry, allowlist)
     if (event.exception?.values !== undefined)
-      next.exception = { ...event.exception, values: event.exception.values.map(value => scrubException(value, allowlist)) }
+      next.exception = { ...event.exception, values: event.exception.values.map(value => scrubException(value, scrubbers)) }
+    if (event.threads?.values !== undefined)
+      next.threads = { ...event.threads, values: event.threads.values.map(thread => withScrubbedStacktrace(thread, scrubbers)) }
     return next
   }
 }
@@ -157,8 +193,27 @@ function scrubRequest(request: NonNullable<SentryEventLike['request']>, redactPa
   }
 }
 
-function scrubException<X extends { value?: string }>(exception: X, allowlist: Allowlist): X {
-  return typeof exception.value === 'string'
-    ? { ...exception, value: allowlist.scrubText(exception.value) }
-    : exception
+function scrubLogentry<L extends NonNullable<SentryEventLike['logentry']>>(logentry: L, allowlist: Allowlist): L {
+  const next: L = { ...logentry }
+  if (typeof logentry.message === 'string')
+    next.message = allowlist.scrubText(logentry.message)
+  if (logentry.params !== undefined)
+    next.params = logentry.params.map(param => allowlist.redact(param))
+  return next
+}
+
+function scrubException<X extends { value?: string, stacktrace?: StacktraceLike }>(exception: X, scrubbers: Scrubbers): X {
+  const next = withScrubbedStacktrace(exception, scrubbers)
+  if (typeof exception.value === 'string')
+    next.value = scrubbers.allowlist.scrubText(exception.value)
+  return next
+}
+
+function withScrubbedStacktrace<T extends { stacktrace?: StacktraceLike }>(owner: T, scrubbers: Scrubbers): T {
+  const frames = owner.stacktrace?.frames
+  if (frames === undefined)
+    return { ...owner }
+  const scrubbed = frames.map(frame =>
+    frame.vars === undefined ? frame : { ...frame, vars: redactRecordWithUrls(frame.vars, scrubbers) })
+  return { ...owner, stacktrace: { ...owner.stacktrace, frames: scrubbed } }
 }

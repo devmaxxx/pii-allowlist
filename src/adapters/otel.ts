@@ -3,6 +3,7 @@ import type { Allowlist } from '../allowlist'
 import { createAllowlist } from '../allowlist'
 
 type ExportCallback = Parameters<SpanExporter['export']>[1]
+type Resource = ReadableSpan['resource']
 
 /**
  * Span attributes that name a template, a code, a system or a count — never a value somebody
@@ -34,11 +35,31 @@ export const DEFAULT_SPAN_ATTRIBUTES: readonly string[] = [
   'error.type',
 ]
 
+/**
+ * Resource attributes that name the service and the SDK. `host.*`, `process.*` (command line,
+ * owner), `container.*` and cloud account IDs are absent on purpose: resource detectors fill them
+ * from the machine, and a command line can carry a secret.
+ */
+export const DEFAULT_RESOURCE_ATTRIBUTES: readonly string[] = [
+  'service.name',
+  'service.version',
+  'service.namespace',
+  'deployment.environment',
+  'deployment.environment.name',
+  'telemetry.sdk.name',
+  'telemetry.sdk.language',
+  'telemetry.sdk.version',
+]
+
 const HTTP_METHOD_KEYS = ['http.request.method', 'http.method'] as const
+
+const defaultResourceAllowlist = /* @__PURE__ */ createAllowlist({ keys: DEFAULT_RESOURCE_ATTRIBUTES })
 
 export interface AllowlistSpanExporterOptions {
   /** Which attribute keys survive. Defaults to {@link DEFAULT_SPAN_ATTRIBUTES}. */
   allowlist?: Allowlist
+  /** Which resource attribute keys survive. Defaults to {@link DEFAULT_RESOURCE_ATTRIBUTES}. */
+  resourceAllowlist?: Allowlist
 }
 
 /**
@@ -60,12 +81,31 @@ export function safeSpanName(name: string, attributes: Readonly<Record<string, u
 }
 
 /**
- * A copy of `span` carrying only what the allowlist names: attributes not on it are dropped and
- * counted in `droppedAttributesCount`; events (recorded exceptions included) are dropped; links
- * keep their span context and lose their attributes; the status keeps its code and loses its
- * message; the name goes through {@link safeSpanName}.
+ * A copy of `resource` carrying only the attributes `allowlist` names. `merge` filters its result
+ * too, so nothing downstream can bring a dropped attribute back.
  */
-export function allowlistSpan(span: ReadableSpan, allowlist: Allowlist): ReadableSpan {
+export function allowlistResource(resource: Resource, allowlist: Allowlist = defaultResourceAllowlist): Resource {
+  const attributes = allowlist.pick(resource.attributes)
+  return {
+    attributes,
+    ...(resource.schemaUrl === undefined ? {} : { schemaUrl: resource.schemaUrl }),
+    merge: other => allowlistResource(resource.merge(other), allowlist),
+    getRawAttributes: () => Object.entries(attributes),
+  }
+}
+
+/**
+ * A copy of `span` carrying only what the allowlists name: attributes not on `allowlist` are
+ * dropped and counted in `droppedAttributesCount`; resource attributes not on `resourceAllowlist`
+ * are dropped; events (recorded exceptions included) are dropped; links keep their span context
+ * and lose their attributes; the status keeps its code and loses its message; the name goes
+ * through {@link safeSpanName}.
+ */
+export function allowlistSpan(
+  span: ReadableSpan,
+  allowlist: Allowlist,
+  resourceAllowlist: Allowlist = defaultResourceAllowlist,
+): ReadableSpan {
   const attributes = allowlist.pick(span.attributes)
   const removed = Object.keys(span.attributes).length - Object.keys(attributes).length
 
@@ -82,7 +122,7 @@ export function allowlistSpan(span: ReadableSpan, allowlist: Allowlist): Readabl
     events: [],
     duration: span.duration,
     ended: span.ended,
-    resource: span.resource,
+    resource: allowlistResource(span.resource, resourceAllowlist),
     instrumentationScope: span.instrumentationScope,
     droppedAttributesCount: span.droppedAttributesCount + removed,
     droppedEventsCount: span.droppedEventsCount + span.events.length,
@@ -99,13 +139,15 @@ export function allowlistSpan(span: ReadableSpan, allowlist: Allowlist): Readabl
  */
 export class AllowlistSpanExporter implements SpanExporter {
   private readonly allowlist: Allowlist
+  private readonly resourceAllowlist: Allowlist
 
   constructor(private readonly next: SpanExporter, options: AllowlistSpanExporterOptions = {}) {
     this.allowlist = options.allowlist ?? createAllowlist({ keys: DEFAULT_SPAN_ATTRIBUTES })
+    this.resourceAllowlist = options.resourceAllowlist ?? defaultResourceAllowlist
   }
 
   export(spans: ReadableSpan[], resultCallback: ExportCallback): void {
-    this.next.export(spans.map(span => allowlistSpan(span, this.allowlist)), resultCallback)
+    this.next.export(spans.map(span => allowlistSpan(span, this.allowlist, this.resourceAllowlist)), resultCallback)
   }
 
   shutdown(): Promise<void> {

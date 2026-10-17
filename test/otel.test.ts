@@ -1,4 +1,6 @@
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base'
 import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api'
+import { resourceFromAttributes } from '@opentelemetry/resources'
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -6,7 +8,7 @@ import {
 } from '@opentelemetry/sdk-trace-base'
 import { describe, expect, it } from 'vitest'
 import { createAllowlist } from '../src'
-import { AllowlistSpanExporter, DEFAULT_SPAN_ATTRIBUTES } from '../src/adapters/otel'
+import { allowlistSpan, AllowlistSpanExporter, DEFAULT_SPAN_ATTRIBUTES } from '../src/adapters/otel'
 
 const PHONE = '+15550100200'
 const EMAIL = 'jane.roe@example.com'
@@ -63,7 +65,7 @@ describe('AllowlistSpanExporter', () => {
     expect(out?.droppedAttributesCount).toBe(6)
     expect(out?.droppedEventsCount).toBe(1)
 
-    const wire = JSON.stringify({ ...out, resource: undefined })
+    const wire = JSON.stringify(out)
     for (const secret of SECRETS)
       expect(wire).not.toContain(secret)
   })
@@ -151,5 +153,59 @@ describe('AllowlistSpanExporter, the pass-through half', () => {
   it('flushes an exporter that has no forceFlush of its own', async () => {
     const bare = { export: () => undefined, shutdown: () => Promise.resolve() }
     await expect(new AllowlistSpanExporter(bare).forceFlush()).resolves.toBeUndefined()
+  })
+})
+
+describe('AllowlistSpanExporter: the resource', () => {
+  function withResource(attributes: Record<string, string>, options?: ConstructorParameters<typeof AllowlistSpanExporter>[1]): ReadableSpan | undefined {
+    const memory = new InMemorySpanExporter()
+    const provider = new BasicTracerProvider({
+      resource: resourceFromAttributes(attributes),
+      spanProcessors: [new SimpleSpanProcessor(new AllowlistSpanExporter(memory, options))],
+    })
+    provider.getTracer('test').startSpan('work').end()
+    return memory.getFinishedSpans()[0]
+  }
+
+  it('keeps only the default resource attributes', () => {
+    const out = withResource({
+      'service.name': 'checkout',
+      'service.version': '1.2.3',
+      'deployment.environment.name': 'prod',
+      'telemetry.sdk.language': 'nodejs',
+      'host.name': 'jane-laptop',
+      'process.command_args': `--token=${TOKEN}`,
+      'enduser.id': EMAIL,
+    })
+
+    expect(out?.resource.attributes).toEqual({
+      'service.name': 'checkout',
+      'service.version': '1.2.3',
+      'deployment.environment.name': 'prod',
+      'telemetry.sdk.language': 'nodejs',
+    })
+    expect(Object.fromEntries(out?.resource.getRawAttributes() ?? [])).toEqual(out?.resource.attributes)
+    expect(JSON.stringify(out?.resource.merge(null).attributes)).not.toContain(TOKEN)
+  })
+
+  it('keeps only what a custom resource allowlist names', () => {
+    const out = withResource(
+      { 'service.name': 'checkout', 'cloud.region': 'eu-west-1' },
+      { resourceAllowlist: createAllowlist({ keys: ['cloud.region'] }) },
+    )
+
+    expect(out?.resource.attributes).toEqual({ 'cloud.region': 'eu-west-1' })
+  })
+
+  it('filters the resource when allowlistSpan is called directly', () => {
+    const memory = new InMemorySpanExporter()
+    const provider = new BasicTracerProvider({
+      resource: resourceFromAttributes({ 'service.name': 'checkout', 'host.name': 'jane-laptop' }),
+      spanProcessors: [new SimpleSpanProcessor(memory)],
+    })
+    provider.getTracer('test').startSpan('work').end()
+    const [raw] = memory.getFinishedSpans()
+
+    expect(raw && allowlistSpan(raw, createAllowlist({ keys: [] })).resource.attributes).toEqual({ 'service.name': 'checkout' })
   })
 })

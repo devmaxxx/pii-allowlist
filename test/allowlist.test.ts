@@ -199,3 +199,36 @@ describe('createAllowlist: regressions', () => {
     expect(Date.now() - started).toBeLessThan(500)
   })
 })
+
+describe('createAllowlist: values that throw when read', () => {
+  function throwingGetter(key: string): Record<string, unknown> {
+    return Object.defineProperty({ status: 'ok' }, key, {
+      enumerable: true,
+      get: () => {
+        throw new Error('nope')
+      },
+    })
+  }
+
+  it('redacts an allowlisted key whose getter throws and keeps its siblings', () => {
+    const allowlist = createAllowlist({ keys: ['status', 'orderId'] })
+
+    expect(allowlist.redact(throwingGetter('orderId'))).toEqual({ status: 'ok', orderId: REDACTED })
+    expect(allowlist.redactRecord(throwingGetter('orderId'))).toEqual({ status: 'ok', orderId: REDACTED })
+  })
+
+  it('redacts a nested object whose keys cannot be listed', () => {
+    const allowlist = createAllowlist({ keys: ['order'] })
+    const order = new Proxy({}, {
+      ownKeys: () => {
+        throw new Error('nope')
+      },
+    })
+
+    expect(allowlist.redact({ order })).toEqual({ order: REDACTED })
+  })
+
+  it('skips an unreadable key in pick', () => {
+    expect(createAllowlist({ keys: ['status', 'orderId'] }).pick(throwingGetter('orderId'))).toEqual({ status: 'ok' })
+  })
+})

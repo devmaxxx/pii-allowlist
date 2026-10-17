@@ -141,3 +141,74 @@ describe('createBeforeSend: extra urls', () => {
     expect(event.extra).toEqual({ url: 'https://app.example/cb' })
   })
 })
+
+describe('createBeforeBreadcrumb: a message that is not a URL', () => {
+  it('keeps a ui.click selector whole', () => {
+    const out = beforeBreadcrumb({ category: 'ui.click', message: 'body > div#root > button.submit' })
+
+    expect(out.message).toBe('body > div#root > button.submit')
+  })
+
+  it('keeps a question in prose and still scrubs e-mail addresses out of it', () => {
+    expect(beforeBreadcrumb({ category: 'app', message: 'Why? failed for a@b.co' }).message).toBe(
+      `Why? failed for ${REDACTED}`,
+    )
+  })
+
+  it('path-redacts an absolute URL message', () => {
+    expect(beforeBreadcrumb({ category: 'app', message: 'https://x.tld/guest-form/T1?email=a@b.co' }).message).toBe(
+      'https://x.tld/guest-form/[token]',
+    )
+  })
+})
+
+describe('createBeforeSend: logentry and stack frame locals', () => {
+  it('scrubs the logentry message and redacts its params', () => {
+    const out = beforeSend(errorEvent({
+      logentry: { message: 'no user a@b.co: %s %o %d', params: ['+15550100200', { email: 'a@b.co', method: 'GET' }, 3] },
+    }))
+
+    expect(out.logentry).toEqual({
+      message: `no user ${REDACTED}: %s %o %d`,
+      params: [REDACTED, { email: REDACTED, method: 'GET' }, 3],
+    })
+  })
+
+  it('redacts exception frame locals that are not on the allowlist', () => {
+    const out = beforeSend(errorEvent({
+      exception: {
+        values: [{
+          type: 'Error',
+          value: 'boom',
+          stacktrace: { frames: [{ function: 'f', vars: { email: 'a@b.co', method: 'GET', url: '/p?code=SECRET' } }, { function: 'g' }] },
+        }],
+      },
+    }))
+
+    expect(out.exception?.values?.[0]?.stacktrace?.frames).toEqual([
+      { function: 'f', vars: { email: REDACTED, method: 'GET', url: '/p' } },
+      { function: 'g' },
+    ])
+  })
+
+  it('redacts thread frame locals likewise', () => {
+    const out = beforeSend(errorEvent({
+      threads: { values: [{ id: 1, stacktrace: { frames: [{ vars: { password: 'hunter2' } }] } }, { id: 2 }] },
+    }))
+
+    expect(out.threads).toEqual({
+      values: [{ id: 1, stacktrace: { frames: [{ vars: { password: REDACTED } }] } }, { id: 2 }],
+    })
+  })
+
+  it('survives an extra value whose getter throws', () => {
+    const extra = Object.defineProperty({}, 'method', {
+      enumerable: true,
+      get: () => {
+        throw new Error('nope')
+      },
+    })
+
+    expect(createBeforeSend()({ extra }).extra).toEqual({ method: REDACTED })
+  })
+})

@@ -16,6 +16,9 @@ export const DEFAULT_TEXT_PATTERNS: readonly RegExp[] = [
 
 const DEFAULT_MAX_DEPTH = 8
 
+/** What a property read that threw yields: a getter or a proxy trap can throw from a plain read. */
+const UNREADABLE = Symbol('unreadable')
+
 /** Replaces the value of a key that is not on the allowlist. */
 export type RedactFn = (key: string, value: unknown) => unknown
 
@@ -49,12 +52,13 @@ export interface Allowlist {
    * A deep copy of `value` where every property whose key is not allowlisted is replaced, subtree
    * and all. Array items inherit their parent key's verdict. Errors are walked as prototype-less
    * `{ type, message, stack, ...ownProperties }` records; dates are kept; maps, sets and binary buffers
-   * are replaced whole; a circular reference becomes {@link CIRCULAR}.
+   * are replaced whole; a circular reference becomes {@link CIRCULAR}. A property whose getter throws
+   * is redacted, and so is an object whose keys cannot be listed; the walk itself never throws.
    */
   redact: (value: unknown) => unknown
   /** {@link Allowlist.redact} for a record, typed as one. */
   redactRecord: (record: Readonly<Record<string, unknown>>) => Record<string, unknown>
-  /** The allowlisted entries of `record` only, unwalked; everything else is dropped. */
+  /** The allowlisted entries of `record` only, unwalked; everything else, an unreadable entry included, is dropped. */
   pick: <V>(record: Readonly<Record<string, V>>) => Record<string, V>
   /** `text` with every text pattern replaced by {@link REDACTED}. */
   scrubText: (text: string) => string
@@ -90,8 +94,16 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
   function walkEntries(value: object, ancestors: object[]): Record<string, unknown> {
     const out = recordFor(value)
     for (const [key, inner] of entriesOf(value))
-      setOwn(out, key, has(key) ? walk(key, inner, ancestors) : redactValue(key, inner))
+      setOwn(out, key, walkEntry(key, inner, ancestors))
     return out
+  }
+
+  function walkEntry(key: string, value: unknown, ancestors: object[]): unknown {
+    if (value === UNREADABLE)
+      return redactValue(key, undefined)
+    if (!has(key))
+      return redactValue(key, value)
+    return walk(key, value, ancestors)
   }
 
   function walk(key: string, value: unknown, ancestors: object[]): unknown {
@@ -101,6 +113,16 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
       return redactValue(key, value)
     if (value === null || typeof value !== 'object')
       return value
+    try {
+      return walkObject(key, value, ancestors)
+    }
+    catch {
+      return redactValue(key, value)
+    }
+  }
+
+  /** Throws only for an exotic object, such as a revoked proxy or one whose traps throw. */
+  function walkObject(key: string, value: object, ancestors: object[]): unknown {
     if (value instanceof Date)
       return new Date(value.getTime())
     if (ancestors.includes(value))
@@ -116,11 +138,21 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
 
   function pick<V>(record: Readonly<Record<string, V>>): Record<string, V> {
     const kept: Record<string, V> = {}
-    for (const [key, value] of Object.entries(record)) {
-      if (has(key))
+    for (const key of Object.keys(record).filter(has)) {
+      const value = readOwn<V>(record, key)
+      if (value !== UNREADABLE)
         setOwn(kept, key, value)
     }
     return kept
+  }
+
+  function redactRecord(record: Readonly<Record<string, unknown>>): Record<string, unknown> {
+    try {
+      return walkEntries(record, [record])
+    }
+    catch {
+      return {}
+    }
   }
 
   function redact(value: unknown): unknown {
@@ -130,7 +162,7 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
   return {
     has,
     redact,
-    redactRecord: record => walkEntries(record, [record]),
+    redactRecord,
     pick,
     scrubText,
   }
@@ -172,14 +204,24 @@ function recordFor(value: object): Record<string, unknown> {
   return value instanceof Error ? Object.create(null) as Record<string, unknown> : {}
 }
 
-/** An error's `name`, `message` and `stack` are not enumerable, so `Object.entries` misses them. */
+/** An error's `name`, `message` and `stack` are not enumerable, so `Object.keys` misses them. */
 function entriesOf(value: object): [string, unknown][] {
+  const own = Object.keys(value).map((key): [string, unknown] => [key, readOwn(value, key)])
   if (!(value instanceof Error))
-    return Object.entries(value)
+    return own
   return [
-    ['type', value.name],
-    ['message', value.message],
-    ['stack', value.stack],
-    ...Object.entries(value),
+    ['type', readOwn(value, 'name')],
+    ['message', readOwn(value, 'message')],
+    ['stack', readOwn(value, 'stack')],
+    ...own,
   ]
+}
+
+function readOwn<V>(value: object, key: string): V | typeof UNREADABLE {
+  try {
+    return (value as Record<string, V>)[key] as V
+  }
+  catch {
+    return UNREADABLE
+  }
 }

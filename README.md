@@ -36,7 +36,7 @@ The same pino call, `logger.info({ userId, email, taxId, shippingAddress }, 'sig
 - **Default deny.** A key not named by `keys` or `patterns` is redacted, subtree and all, at every depth.
 - **Text scrubbing.** E-mail addresses and E.164 phone numbers are cut out of every string that survives, so an allowlisted `message` built by interpolation stays clean.
 - **URL redaction.** Query strings and fragments are always dropped; secret path segments (`/reset/:token`) are replaced.
-- **Safe walk.** Inputs are never mutated; cycles become `[circular]`; depth is capped; errors are walked as `{ type, message, stack, ... }`; maps, sets and buffers are replaced whole; a `__proto__` key is copied as data.
+- **Safe walk.** Inputs are never mutated; cycles become `[circular]`; depth is capped; errors are walked as `{ type, message, stack, ... }`; maps, sets and buffers are replaced whole; a `__proto__` key is copied as data; a getter that throws yields `[redacted]` instead of an exception.
 - **Adapters** for an OpenTelemetry `SpanExporter`, pino `formatters.log` and serializers, and Sentry `beforeSend` / `beforeBreadcrumb`.
 - **Zero dependencies in the core.** Each adapter's framework is an optional peer. ESM only, typed, `sideEffects: false`.
 
@@ -56,7 +56,7 @@ Requires Node 20 or newer. The build is platform-neutral. Add the peer for each 
 | `pii-allowlist` | the core | none |
 | `pii-allowlist/otel` | trace exporters | `@opentelemetry/sdk-trace-base` >= 2 |
 | `pii-allowlist/pino` | log lines | `pino` >= 8 |
-| `pii-allowlist/sentry` | error events and breadcrumbs | `@sentry/core` >= 8 (installed by any Sentry SDK) |
+| `pii-allowlist/sentry` | error events and breadcrumbs | none: typed structurally, fits any Sentry SDK >= 8 |
 
 ## Quick start
 
@@ -89,6 +89,7 @@ const processor = new BatchSpanProcessor(new AllowlistSpanExporter(new OTLPTrace
 The wrapped exporter receives a copy of each span; the spans the rest of the pipeline holds are untouched. In the copy:
 
 - only allowlisted attributes remain (default `DEFAULT_SPAN_ATTRIBUTES`); the rest are counted in `droppedAttributesCount`;
+- the resource keeps only allowlisted attributes (default `DEFAULT_RESOURCE_ATTRIBUTES`: service name, version and namespace, deployment environment, `telemetry.sdk.*`); host, process and container attributes are dropped;
 - events, including recorded exceptions, are dropped; links lose their attributes; the status loses its message;
 - an HTTP span is renamed `METHOD /route/{template}` (or `METHOD` when no route matched); any other name loses its query string.
 
@@ -96,10 +97,11 @@ To allow more attributes:
 
 ```ts
 import { createAllowlist } from 'pii-allowlist'
-import { AllowlistSpanExporter, DEFAULT_SPAN_ATTRIBUTES } from 'pii-allowlist/otel'
+import { AllowlistSpanExporter, DEFAULT_RESOURCE_ATTRIBUTES, DEFAULT_SPAN_ATTRIBUTES } from 'pii-allowlist/otel'
 
 const allowlisted = new AllowlistSpanExporter(exporter, {
   allowlist: createAllowlist({ keys: [...DEFAULT_SPAN_ATTRIBUTES, 'tenant.id'] }),
+  resourceAllowlist: createAllowlist({ keys: [...DEFAULT_RESOURCE_ATTRIBUTES, 'cloud.region'] }),
 })
 ```
 
@@ -160,9 +162,10 @@ Sentry.init({
 
 - `request` keeps only its method and path-redacted URL; body, headers, cookies, query string and env are dropped;
 - `user` is dropped;
-- `extra` keeps allowlisted keys only (default `DEFAULT_SENTRY_KEYS`), walked deep;
-- the transaction name and breadcrumb `url`, `from`, `to` and messages are path-redacted;
-- e-mail addresses and phone numbers are scrubbed out of the message and exception values.
+- `extra` and the local variables (`vars`) of exception and thread stack frames keep allowlisted keys only (default `DEFAULT_SENTRY_KEYS`), walked deep;
+- the transaction name, breadcrumb `url`, `from` and `to`, and breadcrumb messages that are URLs (absolute, or starting with `/`) are path-redacted;
+- e-mail addresses and phone numbers are scrubbed out of the message, the `logentry` message, breadcrumb messages and exception values;
+- `logentry.params` are walked as unnamed values: strings are scrubbed, objects keep allowlisted keys only.
 
 Console and debug breadcrumbs lose their message and data. Both helpers are typed structurally, so they fit `@sentry/node`, `@sentry/browser`, `@sentry/nextjs` and the other SDKs without importing one.
 
@@ -203,10 +206,12 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 
 | Export | |
 | --- | --- |
-| `new AllowlistSpanExporter(next, { allowlist? })` | `SpanExporter` that forwards allowlisted span copies to `next`, plus `shutdown` and `forceFlush`. |
-| `allowlistSpan(span, allowlist)` | The copy of one span the exporter forwards. |
+| `new AllowlistSpanExporter(next, { allowlist?, resourceAllowlist? })` | `SpanExporter` that forwards allowlisted span copies to `next`, plus `shutdown` and `forceFlush`. |
+| `allowlistSpan(span, allowlist, resourceAllowlist?)` | The copy of one span the exporter forwards. |
+| `allowlistResource(resource, allowlist?)` | The copy of a resource the span carries. |
 | `safeSpanName(name, attributes)` | The name a span is exported with. |
 | `DEFAULT_SPAN_ATTRIBUTES` | Default attribute keys. |
+| `DEFAULT_RESOURCE_ATTRIBUTES` | Default resource attribute keys. |
 
 ### `pii-allowlist/pino`
 
@@ -224,7 +229,7 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | --- | --- | --- |
 | `createBeforeSend(options?)` | `allowlist` (default `DEFAULT_SENTRY_KEYS`), `redactPath` (default drops query and fragment) | `beforeSend` |
 | `createBeforeBreadcrumb(options?)` | same | `beforeBreadcrumb` |
-| `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data` and event `extra` keys. |
+| `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data`, event `extra` and stack frame `vars` keys. |
 
 ### Defaults
 
@@ -232,6 +237,7 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | --- | --- | --- |
 | `DEFAULT_TEXT_PATTERNS` | e-mail addresses, E.164 phone numbers (`+` and 9 to 15 digits) | |
 | `DEFAULT_SPAN_ATTRIBUTES` | HTTP method, route, status code, protocol version; `server.address`/`port`; `db.system`, operation, name/namespace; `messaging.system`, destination name, operation; `error.type`. Stable and older semantic-convention names. | `url.*`, `http.target`, `http.url`, `db.statement`, `db.query.text`, `client.address`, `user_agent.original`, headers |
+| `DEFAULT_RESOURCE_ATTRIBUTES` | `service.name`, `service.version`, `service.namespace`, `deployment.environment`, `deployment.environment.name`, `telemetry.sdk.name`, `telemetry.sdk.language`, `telemetry.sdk.version` | `host.*`, `process.*`, `container.*`, cloud account IDs |
 | `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
 | `DEFAULT_SENTRY_KEYS` | `method`, `url`, `from`, `to`, `status_code`, `request_body_size`, `response_body_size` | request bodies |
 
@@ -254,7 +260,8 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 - **Depth cap.** Objects nested deeper than `maxDepth` (default 8) are replaced whole, allowlisted or not.
 - **pino bindings are not walked.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings. Keep personal data out of bindings, or filter them with `formatters.bindings`.
 - **Sentry `tags` and `contexts` are not walked**, because the SDK fills them with runtime and trace data.
-- **Span resources are kept.** They describe the process (service name, host), not a request.
+- **Span resources are filtered, not scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and their values are passed as they are: a service name built from a customer name still leaks.
+- **Breadcrumb messages are URLs only by shape.** A message that is not one, such as `GET /reset/s3cr3t?email=…` in prose, is text-scrubbed but not path-redacted, so its query string stays.
 - **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.
 
 ## Contributing
