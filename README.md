@@ -2,7 +2,7 @@
 
 # pii-allowlist
 
-**Allowlist, don't denylist: keep PII out of logs, traces and error reports.**
+**In-process, before export: one allowlist across pino, OpenTelemetry and Sentry; unknown keys redacted by default.**
 
 [![npm version](https://img.shields.io/npm/v/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
 [![npm downloads](https://img.shields.io/npm/dm/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
@@ -247,11 +247,12 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | --- | --- | --- | --- |
 | **pii-allowlist** | allowlist | redacted | in process, before export |
 | pino `redact` | denylist of paths | logged in clear | in process, pino only |
+| [@pinojs/redact](https://www.npmjs.com/package/@pinojs/redact) (what pino `redact` uses) | denylist of paths | logged in clear | in process |
 | [fast-redact](https://github.com/davidmarkclements/fast-redact) | denylist of paths | logged in clear | in process |
-| OTel Collector attribute processors | per-key rules you configure | depends on the rules | in the Collector, after the data has left the process |
+| OTel Collector [`redaction` processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor) | allowlist (`allowed_keys`), plus `blocked_values` patterns | removed (fails closed unless `allow_all_keys`) | in the Collector — after the data has left the process |
 | Sentry `sendDefaultPii: false` | the SDK skips some data it would collect itself | your own `extra`, breadcrumbs and messages are sent as written | in the SDK |
 
-A denylist is the better fit when the shape of every record is known and fixed. pii-allowlist targets the case where it is not.
+A denylist is the better fit when the shape of every record is known and fixed. If you already run an OpenTelemetry Collector, its `redaction` processor gives you an allowlist for spans, logs and metrics there; pii-allowlist applies one inside the process, before export, and to pino and Sentry as well.
 
 ## Limits
 
