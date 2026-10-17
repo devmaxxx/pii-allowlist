@@ -3,6 +3,7 @@ import pino from 'pino'
 import { describe, expect, it } from 'vitest'
 import { createAllowlist, createPathRedactor, REDACTED } from '../src'
 import {
+  allowlistChildBindings,
   createLogFormatter,
   createMessageSerializer,
   createRequestSerializer,
@@ -147,5 +148,34 @@ describe('createRequestSerializer and responseSerializer', () => {
     expect(createRequestSerializer()({ id: 'r', method: 'GET', url: `/v1/users/${USER.email}` }).url).toBe(
       `/v1/users/${REDACTED}`,
     )
+  })
+})
+
+describe('allowlistChildBindings', () => {
+  function childLine(make: (logger: pino.Logger) => pino.Logger): Record<string, unknown> {
+    return lineFor(shipped, logger => make(allowlistChildBindings(logger)).info('hello'))
+  }
+
+  it('redacts a child logger binding that is not on the list, and keeps one that is', () => {
+    const line = childLine(logger => logger.child({ code: 'c_1', email: USER.email, user: USER }))
+
+    expect(line).toMatchObject({ code: 'c_1', email: REDACTED, user: REDACTED })
+    expect(JSON.stringify(line)).not.toContain(USER.email)
+  })
+
+  it('walks the bindings of a grandchild, and of a child given options', () => {
+    const line = childLine(logger => logger.child({ code: 'c_1' }).child({ phone: USER.phone }, { level: 'info' }))
+
+    expect(line).toMatchObject({ code: 'c_1', phone: REDACTED })
+  })
+})
+
+describe('createLogFormatter: error causes', () => {
+  it('logs the cause chain of an error, scrubbed', () => {
+    const cause = new Error(`no account for ${USER.email}`)
+    const line = lineFor(shipped, logger => logger.error({ err: new Error('signup failed', { cause }) }, 'signup'))
+
+    expect(line.err).toMatchObject({ message: `signup failed: no account for ${REDACTED}` })
+    expect(JSON.stringify(line)).not.toContain(USER.email)
   })
 })

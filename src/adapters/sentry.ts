@@ -2,6 +2,7 @@ import type { Allowlist } from '../allowlist'
 import type { PathRedactor } from '../path'
 import { createAllowlist } from '../allowlist'
 import { createPathRedactor } from '../path'
+import { DEFAULT_SPAN_ATTRIBUTES } from './semconv'
 
 /**
  * Breadcrumb `data`, event `extra` and stack frame `vars` keys that may be reported: what the SDK's
@@ -21,6 +22,40 @@ export const DEFAULT_SENTRY_KEYS: readonly string[] = [
 const URL_KEYS = ['url', 'from', 'to'] as const
 
 /**
+ * Span attributes that may be reported: {@link DEFAULT_SPAN_ATTRIBUTES} plus the metadata the
+ * SDK writes itself. `sentry.segment.name` is the transaction name, so it is path-redacted.
+ */
+export const DEFAULT_SENTRY_SPAN_ATTRIBUTES: readonly string[] = [
+  ...DEFAULT_SPAN_ATTRIBUTES,
+  'sentry.op',
+  'sentry.origin',
+  'sentry.source',
+  'sentry.sample_rate',
+  'sentry.segment.id',
+  'sentry.segment.name',
+  'sentry.release',
+  'sentry.environment',
+  'sentry.sdk.name',
+  'sentry.sdk.version',
+]
+
+/** Log attributes the SDK writes from its own configuration, kept whatever the allowlist says. */
+const LOG_METADATA_KEYS: ReadonlySet<string> = new Set([
+  'sentry.release',
+  'sentry.environment',
+  'sentry.sdk.name',
+  'sentry.sdk.version',
+  'sentry.origin',
+  'sentry.replay_id',
+  'sentry._internal.replay_is_buffering',
+  'sentry.trace.parent_span_id',
+  'sentry.message.template',
+])
+
+/** A parameterized log message stores each interpolated value under one of these, unnamed. */
+const LOG_PARAMETER_KEY = /^sentry\.message\.parameter\.\d+$/
+
+/**
  * The parts of a Sentry breadcrumb this module reads. Structural, so it fits every SDK
  * (`@sentry/node`, `@sentry/browser`, `@sentry/nextjs`, …) without importing one.
  */
@@ -36,6 +71,27 @@ export interface StacktraceLike {
   frames?: { vars?: Record<string, unknown> }[]
 }
 
+/**
+ * The parts of a span this module reads, in either shape the SDK hands `beforeSendSpan`: the
+ * streamed one (`name`, `attributes`, the default from SDK v11) or the static one (`description`,
+ * `op`, `data`), which is also what a transaction event's `spans` hold.
+ */
+export interface SpanLike {
+  name?: string
+  description?: string
+  op?: string
+  attributes?: Record<string, unknown>
+  data?: Record<string, unknown>
+  tags?: Record<string, unknown>
+  links?: { attributes?: unknown }[]
+}
+
+/** The parts of a Sentry log this module reads; see {@link BreadcrumbLike}. */
+export interface LogLike {
+  message?: unknown
+  attributes?: Record<string, unknown>
+}
+
 /** The parts of a Sentry event this module reads; see {@link BreadcrumbLike}. */
 export interface SentryEventLike {
   message?: string
@@ -47,6 +103,8 @@ export interface SentryEventLike {
   breadcrumbs?: BreadcrumbLike[]
   exception?: { values?: { value?: string, stacktrace?: StacktraceLike }[] }
   threads?: { values?: { stacktrace?: StacktraceLike }[] }
+  spans?: SpanLike[]
+  contexts?: { trace?: { data?: Record<string, unknown> } }
 }
 
 export interface SentryScrubOptions {
@@ -61,18 +119,31 @@ export interface SentryScrubOptions {
    * query and the fragment; build one with `tokens` to cut secret path segments too.
    */
   redactPath?: PathRedactor
+  /**
+   * Which span attributes survive; the rest are dropped. Applies to `beforeSendSpan`, to a
+   * transaction's `spans` and to `contexts.trace.data`. Defaults to
+   * {@link DEFAULT_SENTRY_SPAN_ATTRIBUTES}.
+   */
+  spanAllowlist?: Allowlist
 }
 
 interface Scrubbers {
   allowlist: Allowlist
   redactPath: PathRedactor
+  spanAllowlist: Allowlist
 }
 
 function scrubbersOf(options: SentryScrubOptions): Scrubbers {
   return {
     allowlist: options.allowlist ?? createAllowlist({ keys: DEFAULT_SENTRY_KEYS }),
     redactPath: options.redactPath ?? createPathRedactor(),
+    spanAllowlist: options.spanAllowlist ?? createAllowlist({ keys: DEFAULT_SENTRY_SPAN_ATTRIBUTES }),
   }
+}
+
+/** A URL reported on its own: path-redacted, then scrubbed, because a path can hold an address. */
+function scrubUrl(url: string, { allowlist, redactPath }: Scrubbers): string {
+  return allowlist.scrubText(redactPath(url))
 }
 
 /** Path-redacts after the walk, so a throwing getter is met by the walker, not by a spread. */
@@ -142,7 +213,9 @@ export function createBeforeBreadcrumb(
  *  - the transaction name is path-redacted;
  *  - the message, the `logentry` message and each exception's value lose the allowlist's text
  *    patterns; `logentry.params` are walked as unnamed values, so strings are scrubbed and
- *    objects keep allowlisted keys only.
+ *    objects keep allowlisted keys only;
+ *  - a transaction's `spans` and `contexts.trace.data` are scrubbed as {@link createBeforeSendSpan}
+ *    does, so the same function serves as `beforeSendTransaction`.
  *
  * `tags` and `contexts` are not touched: the SDK fills them with runtime and trace data.
  *
@@ -155,19 +228,19 @@ export function createBeforeSend(
   options: SentryScrubOptions = {},
 ): <E extends SentryEventLike>(event: E) => E {
   const scrubbers = scrubbersOf(options)
-  const { allowlist, redactPath } = scrubbers
+  const { allowlist } = scrubbers
 
   return <E extends SentryEventLike>(event: E): E => {
     const next: E = { ...event }
     if (event.request !== undefined)
-      next.request = scrubRequest(event.request, redactPath)
+      next.request = scrubRequest(event.request, scrubbers)
     delete next.user
     if (event.extra !== undefined)
       next.extra = redactRecordWithUrls(event.extra, scrubbers)
     if (event.breadcrumbs !== undefined)
       next.breadcrumbs = event.breadcrumbs.map(crumb => scrubBreadcrumb(crumb, scrubbers))
     if (typeof event.transaction === 'string')
-      next.transaction = redactPath(event.transaction)
+      next.transaction = scrubUrl(event.transaction, scrubbers)
     if (typeof event.message === 'string')
       next.message = allowlist.scrubText(event.message)
     if (event.logentry !== undefined)
@@ -176,14 +249,18 @@ export function createBeforeSend(
       next.exception = { ...event.exception, values: event.exception.values.map(value => scrubException(value, scrubbers)) }
     if (event.threads?.values !== undefined)
       next.threads = { ...event.threads, values: event.threads.values.map(thread => withScrubbedStacktrace(thread, scrubbers)) }
+    if (event.spans !== undefined)
+      next.spans = event.spans.map(span => scrubSpan(span, scrubbers))
+    if (event.contexts?.trace?.data !== undefined)
+      next.contexts = { ...event.contexts, trace: { ...event.contexts.trace, data: scrubSpanAttributes(event.contexts.trace.data, scrubbers) } }
     return next
   }
 }
 
-function scrubRequest(request: NonNullable<SentryEventLike['request']>, redactPath: PathRedactor): { url?: string, method?: string } {
+function scrubRequest(request: NonNullable<SentryEventLike['request']>, scrubbers: Scrubbers): { url?: string, method?: string } {
   return {
     ...(request.method === undefined ? {} : { method: request.method }),
-    ...(request.url === undefined ? {} : { url: redactPath(request.url) }),
+    ...(request.url === undefined ? {} : { url: scrubUrl(request.url, scrubbers) }),
   }
 }
 
@@ -210,4 +287,169 @@ function withScrubbedStacktrace<T extends { stacktrace?: StacktraceLike }>(owner
   const scrubbed = frames.map(frame =>
     frame.vars === undefined ? frame : { ...frame, vars: redactRecordWithUrls(frame.vars, scrubbers) })
   return { ...owner, stacktrace: { ...owner.stacktrace, frames: scrubbed } }
+}
+
+/** Streamed attributes may be wrapped as `{ value, unit }`. */
+function attributeValue(value: unknown): unknown {
+  return typeof value === 'object' && value !== null && 'value' in value ? value.value : value
+}
+
+function stringAttribute(attributes: Record<string, unknown>, key: string): string | undefined {
+  const value = attributeValue(attributes[key])
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+function scrubAttributeValue(value: unknown, scrub: (text: string) => string): unknown {
+  if (typeof value === 'string')
+    return scrub(value)
+  if (Array.isArray(value))
+    return value.map(item => typeof item === 'string' ? scrub(item) : item)
+  if (typeof value === 'object' && value !== null && 'value' in value)
+    return { ...value, value: scrubAttributeValue(value.value, scrub) }
+  return value
+}
+
+/** Non-allowlisted span attributes are dropped, as the OpenTelemetry exporter drops them. */
+function scrubSpanAttributes(attributes: Record<string, unknown>, scrubbers: Scrubbers): Record<string, unknown> {
+  const kept = scrubbers.spanAllowlist.pick(attributes)
+  for (const [key, value] of Object.entries(kept)) {
+    const scrub = key === 'sentry.segment.name'
+      ? (text: string) => scrubUrl(text, scrubbers)
+      : scrubbers.allowlist.scrubText
+    kept[key] = scrubAttributeValue(value, scrub)
+  }
+  return kept
+}
+
+/**
+ * Quoted strings and numbers in a statement become `?`. Database spans are named after their
+ * statement, and an instrumentation that does not parameterize it puts the literals there.
+ */
+const SQL_STRING = /'(?:[^']|'')*'/g
+const SQL_STRING_BACKSLASH_ESCAPED = /'(?:[^'\\]|\\.|'')*'/g
+const SQL_NUMBER = /(?<![\w$.])-?\d+(?:\.\d+)?\b/g
+
+/**
+ * Standard SQL doubles a quote inside a string and MySQL may escape it with a backslash; the span
+ * does not say which. When the two readings disagree, or a quote is left unpaired (a truncated
+ * statement), everything from the first quote on is cut, so no reading leaks a literal's tail.
+ */
+function sanitizeSql(statement: string): string {
+  const strings = statement.replace(SQL_STRING, '?')
+  const firstQuote = statement.indexOf('\'')
+  const ambiguous = strings !== statement.replace(SQL_STRING_BACKSLASH_ESCAPED, '?') || strings.includes('\'')
+  const safe = ambiguous ? `${statement.slice(0, firstQuote)}?` : strings
+  return safe.replace(SQL_NUMBER, '?')
+}
+
+function isDatabaseSpan(op: string | undefined, attributes: Record<string, unknown>): boolean {
+  return op?.startsWith('db') === true
+    || stringAttribute(attributes, 'db.system') !== undefined
+    || stringAttribute(attributes, 'db.system.name') !== undefined
+}
+
+/**
+ * A server span with a matched route is named `METHOD /route/{template}`; a database span has
+ * its literals cut; any other name has the URLs in it path-redacted. All are then text-scrubbed.
+ */
+function safeSentrySpanName(name: string, op: string | undefined, attributes: Record<string, unknown>, scrubbers: Scrubbers): string {
+  const method = stringAttribute(attributes, 'http.request.method') ?? stringAttribute(attributes, 'http.method')
+  const route = stringAttribute(attributes, 'http.route')
+  let safe: string
+  if (isDatabaseSpan(op, attributes))
+    safe = sanitizeSql(name)
+  else if (method !== undefined && route !== undefined)
+    safe = `${method} ${route}`
+  else
+    safe = redactUrlWords(name, scrubbers.redactPath)
+  return scrubbers.allowlist.scrubText(safe)
+}
+
+function scrubSpan<S extends SpanLike>(span: S, scrubbers: Scrubbers): S {
+  const raw = span.attributes ?? span.data ?? {}
+  const next: S = { ...span }
+  if (span.attributes !== undefined)
+    next.attributes = scrubSpanAttributes(span.attributes, scrubbers)
+  if (span.data !== undefined)
+    next.data = scrubSpanAttributes(span.data, scrubbers)
+  if (span.tags !== undefined)
+    next.tags = scrubSpanAttributes(span.tags, scrubbers)
+  if (typeof span.name === 'string')
+    next.name = safeSentrySpanName(span.name, span.op, raw, scrubbers)
+  if (typeof span.description === 'string')
+    next.description = safeSentrySpanName(span.description, span.op, raw, scrubbers)
+  if (span.links !== undefined)
+    next.links = span.links.map(({ attributes: _dropped, ...link }) => link)
+  return next
+}
+
+/**
+ * Sentry's `beforeSendSpan`. Since SDK v11 spans are streamed by default, and a streamed span
+ * never passes through `beforeSend` or `beforeSendTransaction`, so without this hook its
+ * attributes (`url.full`, `db.query.text`, …) leave as they are.
+ *
+ * Attributes not on `spanAllowlist` are dropped; the rest have the text patterns scrubbed out;
+ * the name (or the static shape's `description`) is made safe: `METHOD /route` for a routed
+ * server span, literals cut from a database statement, URLs path-redacted; link attributes are
+ * dropped. The hook cannot drop a span, so it never returns `null`.
+ *
+ * @example
+ * Sentry.init({ beforeSendSpan: createBeforeSendSpan({ redactPath }) })
+ * // traceLifecycle: 'static' (SDK v10 and earlier, or opted in):
+ * Sentry.init({ beforeSendSpan: Sentry.withStaticSpan(createBeforeSendSpan()) })
+ */
+export function createBeforeSendSpan(
+  options: SentryScrubOptions = {},
+): <S extends SpanLike>(span: S) => S {
+  const scrubbers = scrubbersOf(options)
+  return span => scrubSpan(span, scrubbers)
+}
+
+/**
+ * Sentry's `beforeSendLog`, for `Sentry.logger.*`. The message loses the text patterns. An
+ * attribute keeps its value when `allowlist` names it and is redacted otherwise; that includes
+ * `user.id`, `user.email` and `user.name`, which the SDK copies from the scope. The values a
+ * parameterized message was built from (`sentry.message.parameter.N`) are walked as unnamed
+ * values, and the SDK's own metadata (`sentry.release`, `sentry.environment`, …) is kept.
+ *
+ * @example
+ * Sentry.init({ beforeSendLog: createBeforeSendLog() })
+ */
+export function createBeforeSendLog(
+  options: SentryScrubOptions = {},
+): <L extends LogLike>(log: L) => L {
+  const scrubbers = scrubbersOf(options)
+  const { allowlist } = scrubbers
+
+  return <L extends LogLike>(log: L): L => {
+    const next: L = { ...log }
+    if (log.message !== undefined)
+      next.message = scrubLogMessage(log.message, allowlist)
+    if (log.attributes !== undefined)
+      next.attributes = scrubLogAttributes(log.attributes, scrubbers)
+    return next
+  }
+}
+
+/** `fmt` builds a `String` object, which `typeof` calls an object; anything else is walked, not stringified. */
+function scrubLogMessage(message: unknown, allowlist: Allowlist): unknown {
+  if (typeof message === 'string' || Object.prototype.toString.call(message) === '[object String]') {
+    return allowlist.scrubText(String(message))
+  }
+  return allowlist.redact(message)
+}
+
+function scrubLogAttributes(attributes: Record<string, unknown>, scrubbers: Scrubbers): Record<string, unknown> {
+  const { allowlist } = scrubbers
+  const own: Record<string, unknown> = {}
+  const sdk: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(attributes)) {
+    if (LOG_METADATA_KEYS.has(key))
+      sdk[key] = typeof value === 'string' ? allowlist.scrubText(value) : value
+    else if (LOG_PARAMETER_KEY.test(key))
+      sdk[key] = allowlist.redact(value)
+    else
+      own[key] = value
+  }
+  return { ...redactRecordWithUrls(own, scrubbers), ...sdk }
 }

@@ -6,12 +6,14 @@ export const CIRCULAR = '[circular]'
 
 /**
  * Text shapes scrubbed from every string an allowlisted key carries: an e-mail address and an
- * E.164 phone number. A key on the list says its value is safe to log; these catch the message
- * somebody built by interpolating one into it anyway.
+ * international phone number. A key on the list says its value is safe to log; these catch the
+ * message somebody built by interpolating one into it anyway. A phone number starts with `+` and
+ * has 8 to 15 digits, which may be grouped by spaces, dots, dashes or parentheses, as people
+ * write them: `+14155550123`, `+1 (415) 555-0123`, `+44 20 7946 0958`.
  */
 export const DEFAULT_TEXT_PATTERNS: readonly RegExp[] = [
   /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}.-]{1,253}\.\p{L}{2,}/gu,
-  /\+\d{9,15}\b/g,
+  /\+\d(?:[ .()-]{0,2}\d){7,14}\b/g,
 ]
 
 const DEFAULT_MAX_DEPTH = 8
@@ -204,15 +206,23 @@ function recordFor(value: object): Record<string, unknown> {
   return value instanceof Error ? Object.create(null) as Record<string, unknown> : {}
 }
 
-/** An error's `name`, `message` and `stack` are not enumerable, so `Object.keys` misses them. */
+/**
+ * An error's `name`, `message` and `stack` are not enumerable, so `Object.keys` misses them; nor is
+ * the `cause` that `new Error(message, { cause })` sets, which is walked like any other key.
+ */
 function entriesOf(value: object): [string, unknown][] {
-  const own = Object.keys(value).map((key): [string, unknown] => [key, readOwn(value, key)])
+  const keys = Object.keys(value)
+  const own = keys.map((key): [string, unknown] => [key, readOwn(value, key)])
   if (!(value instanceof Error))
     return own
+  const cause: [string, unknown][] = Object.hasOwn(value, 'cause') && !keys.includes('cause')
+    ? [['cause', readOwn(value, 'cause')]]
+    : []
   return [
     ['type', readOwn(value, 'name')],
     ['message', readOwn(value, 'message')],
     ['stack', readOwn(value, 'stack')],
+    ...cause,
     ...own,
   ]
 }

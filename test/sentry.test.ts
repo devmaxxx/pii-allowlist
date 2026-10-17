@@ -1,7 +1,7 @@
 import type { Breadcrumb, ErrorEvent, Options } from '@sentry/core'
 import { describe, expect, it } from 'vitest'
 import { createAllowlist, createPathRedactor, REDACTED } from '../src'
-import { createBeforeBreadcrumb, createBeforeSend } from '../src/adapters/sentry'
+import { createBeforeBreadcrumb, createBeforeSend, createBeforeSendLog, createBeforeSendSpan } from '../src/adapters/sentry'
 
 const redactPath = createPathRedactor({
   tokens: ['/guest-form/:token', '/manage-booking/:token', '/team/accept/:token', '/ical/*/:token.ics'],
@@ -216,5 +216,148 @@ describe('createBeforeSend: logentry and stack frame locals', () => {
     })
 
     expect(createBeforeSend()({ extra }).extra).toEqual({ method: REDACTED })
+  })
+})
+
+const EMAIL = 'jane.roe@example.com'
+
+describe('createBeforeSend: e-mail addresses in URLs', () => {
+  it('scrubs an address from the path of request.url and the transaction name', () => {
+    const out = beforeSend({ request: { url: `https://x.tld/users/${EMAIL}/edit` }, transaction: `GET /users/${EMAIL}` })
+    expect(out.request?.url).toBe(`https://x.tld/users/${REDACTED}/edit`)
+    expect(out.transaction).toBe(`GET /users/${REDACTED}`)
+  })
+})
+
+describe('createBeforeSend as beforeSendTransaction', () => {
+  it('scrubs the spans of a transaction and its trace context data', () => {
+    const out = beforeSend({
+      transaction: 'GET /orders/:id',
+      contexts: { trace: { data: { 'http.route': '/orders/:id', 'url.full': `https://x.tld/orders/1?email=${EMAIL}` } } },
+      spans: [
+        { op: 'http.client', description: `GET https://api.tld/v1/users?email=${EMAIL}`, data: { 'url.full': `https://api.tld/v1/users?email=${EMAIL}`, 'http.request.method': 'GET' } },
+        { op: 'db', description: `SELECT * FROM users WHERE email = '${EMAIL}' AND age > 30`, data: { 'db.system': 'postgresql', 'db.statement': `SELECT '${EMAIL}'` } },
+      ],
+    })
+
+    expect(out.contexts?.trace?.data).toEqual({ 'http.route': '/orders/:id' })
+    expect(out.spans).toEqual([
+      { op: 'http.client', description: 'GET https://api.tld/v1/users', data: { 'http.request.method': 'GET' } },
+      { op: 'db', description: 'SELECT * FROM users WHERE email = ? AND age > ?', data: { 'db.system': 'postgresql' } },
+    ])
+  })
+})
+
+describe('createBeforeSendSpan', () => {
+  const beforeSendSpan = createBeforeSendSpan({ redactPath })
+
+  it('drops non-allowlisted attributes of a streamed span and names a routed server span by its route', () => {
+    const out = beforeSendSpan({
+      name: `GET /guest-form/LIVE-TOKEN?email=${EMAIL}`,
+      attributes: {
+        'http.request.method': 'GET',
+        'http.route': '/guest-form/:token',
+        'url.full': `https://x.tld/guest-form/LIVE-TOKEN?email=${EMAIL}`,
+        'user.email': EMAIL,
+        'sentry.op': 'http.server',
+        'sentry.segment.name': `GET /guest-form/LIVE-TOKEN?email=${EMAIL}`,
+      },
+      links: [{ attributes: { email: EMAIL } }],
+    })
+
+    expect(out).toEqual({
+      name: 'GET /guest-form/:token',
+      attributes: {
+        'http.request.method': 'GET',
+        'http.route': '/guest-form/:token',
+        'sentry.op': 'http.server',
+        'sentry.segment.name': 'GET /guest-form/[token]',
+      },
+      links: [{}],
+    })
+  })
+
+  it('unwraps an attribute given as { value, unit } and scrubs its text', () => {
+    const out = beforeSendSpan({ name: 'job', attributes: { 'messaging.destination.name': { value: `queue of ${EMAIL}`, unit: 'none' } } })
+    expect(out.attributes).toEqual({ 'messaging.destination.name': { value: `queue of ${REDACTED}`, unit: 'none' } })
+  })
+
+  it('cuts literals from a database span named after its statement, keeping placeholders', () => {
+    const out = beforeSendSpan({
+      name: `UPDATE users SET phone = '+15550100200' WHERE id = 42 AND name = 'O''Brien' AND t = $1`,
+      attributes: { 'db.system.name': 'postgresql' },
+    })
+    expect(out.name).toBe('UPDATE users SET phone = ? WHERE id = ? AND name = ? AND t = $1')
+  })
+
+  it.each([
+    [`SELECT * FROM t WHERE n = 'it\\'s Jane Roe' AND id = 7`, 'SELECT * FROM t WHERE n = ?'],
+    [`SELECT * FROM t WHERE p = 'C:\\' AND n = 'Jane Roe'`, 'SELECT * FROM t WHERE p = ?'],
+    [`INSERT INTO t VALUES (1, 'Jane Ro`, 'INSERT INTO t VALUES (?, ?'],
+  ])('cuts from the first quote when a literal cannot be paired safely: %s', (name, expected) => {
+    expect(beforeSendSpan({ name, op: 'db' }).name).toBe(expected)
+  })
+
+  it('keeps an identifier that ends in a digit', () => {
+    const out = beforeSendSpan({ name: 'SELECT col1 FROM table2', op: 'db.query', data: {} })
+    expect(out.name).toBe('SELECT col1 FROM table2')
+  })
+})
+
+describe('createBeforeSendLog', () => {
+  const beforeSendLog = createBeforeSendLog({ allowlist: createAllowlist({ keys: ['orderId'] }) })
+
+  it('scrubs the message and redacts attributes not on the list, user fields included', () => {
+    const out = beforeSendLog({
+      level: 'info',
+      message: `order placed for ${EMAIL}`,
+      attributes: { 'orderId': 'o_1', 'note': 'leave at door', 'user.email': EMAIL, 'user.id': 'u_1' },
+    })
+    expect(out).toEqual({
+      level: 'info',
+      message: `order placed for ${REDACTED}`,
+      attributes: { 'orderId': 'o_1', 'note': REDACTED, 'user.email': REDACTED, 'user.id': REDACTED },
+    })
+  })
+
+  it('keeps the SDK metadata and walks message parameters as unnamed values', () => {
+    const out = beforeSendLog({
+      message: `order o_1 for ${EMAIL}`,
+      attributes: {
+        'sentry.environment': 'production',
+        'sentry.message.template': 'order %s for %s',
+        'sentry.message.parameter.0': 'o_1',
+        'sentry.message.parameter.1': EMAIL,
+        'sentry.message.parameter.2': { email: EMAIL, orderId: 'o_1' },
+      },
+    })
+    expect(out.attributes).toEqual({
+      'sentry.environment': 'production',
+      'sentry.message.template': 'order %s for %s',
+      'sentry.message.parameter.0': 'o_1',
+      'sentry.message.parameter.1': REDACTED,
+      'sentry.message.parameter.2': { email: REDACTED, orderId: 'o_1' },
+    })
+  })
+
+  it('turns a parameterized String object message into a scrubbed string', () => {
+    const message = Object.assign(new Object(`hi ${EMAIL}`), { __sentry_template_string__: 'hi %s' })
+    expect(beforeSendLog({ message }).message).toBe(`hi ${REDACTED}`)
+  })
+})
+
+describe('review regressions', () => {
+  it('path-redacts a url attribute of a Sentry log', () => {
+    const log = createBeforeSendLog()({ message: 'hi', attributes: { url: 'https://a.example/x?token=abc' } })
+    expect(log.attributes?.url).toBe('https://a.example/x')
+  })
+
+  it('drops tags that are not on the span allowlist from a transaction span', () => {
+    const event = createBeforeSend()({ spans: [{ description: 'GET /a', tags: { 'email': 'x@y.zz', 'http.method': 'GET' } }] })
+    expect(event.spans?.[0]?.tags).toEqual({ 'http.method': 'GET' })
+  })
+
+  it('does not throw on a prototype-less log message', () => {
+    expect(() => createBeforeSendLog()({ message: Object.create(null) })).not.toThrow()
   })
 })

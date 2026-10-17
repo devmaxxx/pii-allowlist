@@ -34,10 +34,10 @@ The same pino call, `logger.info({ userId, email, taxId, shippingAddress }, 'sig
 ## Features
 
 - **Default deny.** A key not named by `keys` or `patterns` is redacted, subtree and all, at every depth.
-- **Text scrubbing.** E-mail addresses and E.164 phone numbers are cut out of every string that survives, so an allowlisted `message` built by interpolation stays clean.
+- **Text scrubbing.** E-mail addresses and international phone numbers (`+1 (415) 555-0123` as well as `+14155550123`) are cut out of every string that survives, in logs, span attributes and names, and Sentry events alike, so an allowlisted `message` built by interpolation stays clean.
 - **URL redaction.** Query strings and fragments are always dropped; secret path segments (`/reset/:token`) are replaced.
 - **Safe walk.** Inputs are never mutated; cycles become `[circular]`; depth is capped; errors are walked as `{ type, message, stack, ... }`; maps, sets and buffers are replaced whole; a `__proto__` key is copied as data; a getter that throws yields `[redacted]` instead of an exception.
-- **Adapters** for an OpenTelemetry `SpanExporter`, pino `formatters.log` and serializers, and Sentry `beforeSend` / `beforeBreadcrumb`.
+- **Adapters** for an OpenTelemetry `SpanExporter`; pino `formatters.log`, serializers and child bindings; and Sentry `beforeSend`, `beforeSendTransaction`, `beforeSendSpan`, `beforeSendLog` and `beforeBreadcrumb`.
 - **Zero dependencies in the core.** Each adapter's framework is an optional peer. ESM only, typed, `sideEffects: false`.
 
 ## Install
@@ -123,6 +123,16 @@ logger.info({ orderId: 'o_1', email: 'jane@example.com' }, 'order placed for jan
 // {"level":30,...,"orderId":"o_1","email":"[redacted]","msg":"order placed for [redacted]"}
 ```
 
+Child-logger bindings skip `formatters.log`, and `formatters.bindings` only sees the base bindings. Wrap the root logger so every `child()` below it walks its bindings:
+
+```ts
+import { allowlistChildBindings } from 'pii-allowlist/pino'
+
+const logger = allowlistChildBindings(pino({ formatters: { log: createLogFormatter() } }))
+logger.child({ reqId: 'r_1', email: 'jane@example.com' }).info('hi')
+// {...,"reqId":"r_1","email":"[redacted]","msg":"hi"}
+```
+
 With pino-http, pino calls `formatters.log` before its serializers, so `req` and `res` are still raw Node objects there. Pass them through to serializers that reduce them:
 
 ```ts
@@ -145,7 +155,7 @@ const options = {
 ```ts
 import * as Sentry from '@sentry/node'
 import { createPathRedactor } from 'pii-allowlist'
-import { createBeforeBreadcrumb, createBeforeSend } from 'pii-allowlist/sentry'
+import { createBeforeBreadcrumb, createBeforeSend, createBeforeSendLog, createBeforeSendSpan } from 'pii-allowlist/sentry'
 
 const redactPath = createPathRedactor({ tokens: ['/reset/:token', '/calendar/*/:token.ics'] })
 
@@ -153,6 +163,8 @@ Sentry.init({
   dsn: process.env.SENTRY_DSN,
   beforeSend: createBeforeSend({ redactPath }),
   beforeBreadcrumb: createBeforeBreadcrumb({ redactPath }),
+  beforeSendSpan: createBeforeSendSpan({ redactPath }),
+  beforeSendLog: createBeforeSendLog(),
 })
 ```
 
@@ -160,14 +172,19 @@ Sentry.init({
 
 `beforeSend` returns a scrubbed copy of the event:
 
-- `request` keeps only its method and path-redacted URL; body, headers, cookies, query string and env are dropped;
+- `request` keeps only its method and its path-redacted, text-scrubbed URL; body, headers, cookies, query string and env are dropped;
 - `user` is dropped;
 - `extra` and the local variables (`vars`) of exception and thread stack frames keep allowlisted keys only (default `DEFAULT_SENTRY_KEYS`), walked deep;
 - the transaction name, breadcrumb `url`, `from` and `to`, and breadcrumb messages that are URLs (absolute, or starting with `/`) are path-redacted;
 - e-mail addresses and phone numbers are scrubbed out of the message, the `logentry` message, breadcrumb messages and exception values;
-- `logentry.params` are walked as unnamed values: strings are scrubbed, objects keep allowlisted keys only.
+- `logentry.params` are walked as unnamed values: strings are scrubbed, objects keep allowlisted keys only;
+- a transaction's `spans` and `contexts.trace.data` are scrubbed as `beforeSendSpan` does, so the same function serves as `beforeSendTransaction` under `traceLifecycle: 'static'`.
 
-Console and debug breadcrumbs lose their message and data. Both helpers are typed structurally, so they fit `@sentry/node`, `@sentry/browser`, `@sentry/nextjs` and the other SDKs without importing one.
+From SDK v11 spans are streamed by default and never reach `beforeSend` or `beforeSendTransaction`: without `beforeSendSpan`, `url.full`, `db.query.text` and the rest leave as recorded. `createBeforeSendSpan` drops attributes not on `spanAllowlist` (default `DEFAULT_SENTRY_SPAN_ATTRIBUTES`), scrubs the rest, and makes the name safe: `METHOD /route` for a routed server span, literals replaced by `?` in a database statement, URLs path-redacted elsewhere. For the static span shape, wrap it: `Sentry.withStaticSpan(createBeforeSendSpan())`.
+
+`createBeforeSendLog` scrubs the message of `Sentry.logger.*` calls and redacts attributes not on `allowlist`, including `user.id`, `user.email` and `user.name`, which the SDK copies from the scope. The values a parameterized message was built from are walked as unnamed values; the SDK's own `sentry.*` metadata is kept.
+
+Console and debug breadcrumbs lose their message and data. All helpers are typed structurally, so they fit `@sentry/node`, `@sentry/browser`, `@sentry/nextjs` and the other SDKs without importing one.
 
 ## API
 
@@ -221,6 +238,7 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | `createMessageSerializer(options?)` | `allowlist` (whose text patterns apply) | serializer for `msg` |
 | `createRequestSerializer(options?)` | `redactPath`, `allowlist` | `req` serializer: `{ id, method, url }`, query shown as `?[redacted]` |
 | `responseSerializer` | | `res` serializer: `{ statusCode }` |
+| `allowlistChildBindings(logger, options?)` | `allowlist` (default `DEFAULT_LOG_KEYS`) | the same logger, whose `child()` bindings are walked, for every descendant |
 | `DEFAULT_LOG_KEYS` | | Default log keys. |
 
 ### `pii-allowlist/sentry`
@@ -229,17 +247,21 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | --- | --- | --- |
 | `createBeforeSend(options?)` | `allowlist` (default `DEFAULT_SENTRY_KEYS`), `redactPath` (default drops query and fragment) | `beforeSend` |
 | `createBeforeBreadcrumb(options?)` | same | `beforeBreadcrumb` |
-| `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data`, event `extra` and stack frame `vars` keys. |
+| `createBeforeSendSpan(options?)` | same, plus `spanAllowlist` (default `DEFAULT_SENTRY_SPAN_ATTRIBUTES`; also used by `createBeforeSend` for transaction spans) | `beforeSendSpan` |
+| `createBeforeSendLog(options?)` | `allowlist` | `beforeSendLog` |
+| `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data`, event `extra`, stack frame `vars` and log attribute keys. |
+| `DEFAULT_SENTRY_SPAN_ATTRIBUTES` | | Default span attribute keys. |
 
 ### Defaults
 
 | List | Contents | Left out on purpose |
 | --- | --- | --- |
-| `DEFAULT_TEXT_PATTERNS` | e-mail addresses, E.164 phone numbers (`+` and 9 to 15 digits) | |
+| `DEFAULT_TEXT_PATTERNS` | e-mail addresses, international phone numbers (`+` and 8 to 15 digits, optionally grouped by spaces, dots, dashes or parentheses) | numbers without a leading `+`, which cannot be told from IDs and amounts |
 | `DEFAULT_SPAN_ATTRIBUTES` | HTTP method, route, status code, protocol version; `server.address`/`port`; `db.system`, operation, name/namespace; `messaging.system`, destination name, operation; `error.type`. Stable and older semantic-convention names. | `url.*`, `http.target`, `http.url`, `db.statement`, `db.query.text`, `client.address`, `user_agent.original`, headers |
 | `DEFAULT_RESOURCE_ATTRIBUTES` | `service.name`, `service.version`, `service.namespace`, `deployment.environment`, `deployment.environment.name`, `telemetry.sdk.name`, `telemetry.sdk.language`, `telemetry.sdk.version` | `host.*`, `process.*`, `container.*`, cloud account IDs |
-| `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
+| `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `cause`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
 | `DEFAULT_SENTRY_KEYS` | `method`, `url`, `from`, `to`, `status_code`, `request_body_size`, `response_body_size` | request bodies |
+| `DEFAULT_SENTRY_SPAN_ATTRIBUTES` | `DEFAULT_SPAN_ATTRIBUTES`, plus `sentry.op`, `origin`, `source`, `sample_rate`, `segment.id`, `segment.name` (path-redacted), `release`, `environment`, `sdk.name`, `sdk.version` | `user.*`, and what `DEFAULT_SPAN_ATTRIBUTES` leaves out |
 
 ## Compared with
 
@@ -249,6 +271,7 @@ Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TE
 | pino `redact` | denylist of paths | logged in clear | in process, pino only |
 | [@pinojs/redact](https://www.npmjs.com/package/@pinojs/redact) (what pino `redact` uses) | denylist of paths | logged in clear | in process |
 | [fast-redact](https://github.com/davidmarkclements/fast-redact) | denylist of paths | logged in clear | in process |
+| [redact-pii](https://www.npmjs.com/package/redact-pii) and similar text scrubbers | denylist of value shapes (e-mail, phone, card, SSN, IP) | sent unless a pattern recognises the value | in process, on strings |
 | OTel Collector [`redaction` processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor) | allowlist (`allowed_keys`), plus `blocked_values` patterns | removed (fails closed unless `allow_all_keys`) | in the Collector — after the data has left the process |
 | Sentry `sendDefaultPii: false` | the SDK skips some data it would collect itself | your own `extra`, breadcrumbs and messages are sent as written | in the SDK |
 
@@ -256,12 +279,13 @@ A denylist is the better fit when the shape of every record is known and fixed. 
 
 ## Limits
 
-- **Keys, not values.** An allowlisted key carries whatever value it is given. The default text patterns catch only e-mail addresses and E.164 phone numbers; they cannot recognise a name, a street address or a national ID. Keep free-text keys off the list, or add `textPatterns` for your own formats.
+- **Keys, not values.** An allowlisted key carries whatever value it is given. The default text patterns catch only e-mail addresses and international phone numbers; they cannot recognise a name, a street address or a national ID. Keep free-text keys off the list, or add `textPatterns` for your own formats.
 - **Patterns are broad.** `/Id$/` also admits `taxId`. Prefer exact keys.
 - **Depth cap.** Objects nested deeper than `maxDepth` (default 8) are replaced whole, allowlisted or not.
-- **pino bindings are not walked.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings. Keep personal data out of bindings, or filter them with `formatters.bindings`.
-- **Sentry `tags` and `contexts` are not walked**, because the SDK fills them with runtime and trace data.
-- **Span resources are filtered, not scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and their values are passed as they are: a service name built from a customer name still leaks.
+- **pino child bindings need the wrapper.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings; wrap the root logger with `allowlistChildBindings`. Base bindings (`pid`, `hostname`, `base`) are not walked.
+- **Sentry `tags` and `contexts` are not walked**, except `contexts.trace.data`, because the SDK fills them with runtime and trace data.
+- **SQL literals are found by shape.** A database span name loses `'quoted'` strings and numbers; when a backslash or an unpaired quote makes the strings ambiguous, everything from the first quote on is cut. An identifier quoted with `"` is kept, as are literals a dialect writes some other way (`$$dollar-quoted$$` strings).
+- **Span resources are filtered, then text-scrubbed.** Only `DEFAULT_RESOURCE_ATTRIBUTES` (or your `resourceAllowlist`) survive, and only e-mail addresses and phone numbers are cut from their values: a service name built from a customer name still leaks.
 - **URLs in breadcrumb messages are found by shape.** Only whitespace-delimited words starting with `/` or a scheme (`https://…`) are path-redacted; a URL glued to other text, such as `url=/reset/s3cr3t`, is text-scrubbed only.
 - **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.
 

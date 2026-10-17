@@ -232,3 +232,43 @@ describe('createAllowlist: values that throw when read', () => {
     expect(createAllowlist({ keys: ['status', 'orderId'] }).pick(throwingGetter('orderId'))).toEqual({ status: 'ok' })
   })
 })
+
+describe('createAllowlist: phone numbers as people write them', () => {
+  const allowlist = createAllowlist({ keys: ['message'] })
+
+  it.each([
+    '+1 (415) 555-0123',
+    '+44 20 7946 0958',
+    '+49-30-901820',
+    '+33.1.23.45.67.89',
+  ])('scrubs %s', (phone) => {
+    expect(allowlist.scrubText(`call ${phone} today`)).toBe(`call ${REDACTED} today`)
+  })
+
+  it('keeps short signed numbers and offsets that are not phone numbers', () => {
+    expect(allowlist.scrubText('delta +42, tz +05:30, build +1234')).toBe('delta +42, tz +05:30, build +1234')
+  })
+})
+
+describe('createAllowlist: error causes', () => {
+  it('walks the cause an error was constructed with, which is not enumerable', () => {
+    const error = new Error('outer', { cause: Object.assign(new Error(`inner ${EMAIL}`), { email: EMAIL }) })
+    const allowlist = createAllowlist({ keys: ['err', 'type', 'message', 'cause'] })
+
+    expect(allowlist.redact({ err: error })).toEqual({
+      err: {
+        type: 'Error',
+        message: 'outer',
+        stack: REDACTED,
+        cause: { type: 'Error', message: `inner ${REDACTED}`, stack: REDACTED, email: REDACTED },
+      },
+    })
+  })
+
+  it('redacts a cause whose key is not on the list', () => {
+    const error = new Error('outer', { cause: { email: EMAIL } })
+    const allowlist = createAllowlist({ keys: ['err', 'message'] })
+
+    expect(allowlist.redact({ err: error })).toMatchObject({ err: { cause: REDACTED } })
+  })
+})
