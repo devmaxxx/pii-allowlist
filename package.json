@@ -1,0 +1,81 @@
+{
+  "name": "pii-allowlist",
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.23.0",
+  "description": "Default-deny PII filtering for logs, traces and error reports: only allowlisted keys leave the process",
+  "author": "arenuzzz",
+  "license": "MIT",
+  "homepage": "https://github.com/arenuzzz/pii-allowlist#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arenuzzz/pii-allowlist.git"
+  },
+  "bugs": "https://github.com/arenuzzz/pii-allowlist/issues",
+  "keywords": [
+    "pii",
+    "gdpr",
+    "redact",
+    "redaction",
+    "allowlist",
+    "privacy",
+    "logging",
+    "pino",
+    "opentelemetry",
+    "otel",
+    "sentry",
+    "scrub"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": "./dist/index.js",
+    "./otel": "./dist/otel.js",
+    "./pino": "./dist/pino.js",
+    "./sentry": "./dist/sentry.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "lint": "eslint .",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm build"
+  },
+  "peerDependencies": {
+    "@opentelemetry/sdk-trace-base": ">=2.0.0",
+    "@sentry/core": ">=8.0.0",
+    "pino": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/sdk-trace-base": {
+      "optional": true
+    },
+    "@sentry/core": {
+      "optional": true
+    },
+    "pino": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.5.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
+    "@sentry/core": "^11.8.0",
+    "@types/node": "^22.20.5",
+    "eslint": "^10.13.0",
+    "pino": "^10.4.0",
+    "publint": "^0.3.25",
+    "tsdown": "^0.23.1",
+    "typescript": "^6.0.3",
+    "unrun": "^0.3.1",
+    "vitest": "^5.0.5"
+  }
+}
