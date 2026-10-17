@@ -52,6 +52,7 @@
     "lint": "eslint .",
     "typecheck": "tsc",
     "test": "vitest run",
+    "examples": "node --experimental-strip-types --no-warnings examples/pino.ts && node --experimental-strip-types --no-warnings examples/otel.ts && node --experimental-strip-types --no-warnings examples/sentry.ts",
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {

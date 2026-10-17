@@ -12,7 +12,7 @@
 [![bundle size](https://img.shields.io/bundlephobia/minzip/pii-allowlist)](https://bundlephobia.com/package/pii-allowlist)
 [![license](https://img.shields.io/npm/l/pii-allowlist)](./LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [OpenTelemetry](#opentelemetry) · [pino](#pino) · [Sentry](#sentry) · [API](#api) · [Limits](#limits)
+[Install](#install) · [Quick start](#quick-start) · [Examples](#examples) · [OpenTelemetry](#opentelemetry) · [pino](#pino) · [Sentry](#sentry) · [API](#api) · [Limits](#limits)
 
 </div>
 
@@ -35,6 +35,7 @@ flowchart LR
 - [Features](#features)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Examples](#examples)
 - [OpenTelemetry](#opentelemetry) · [logs](#opentelemetry-logs)
 - [pino](#pino)
 - [Sentry](#sentry)
@@ -106,6 +107,33 @@ allowlist.redact({
 // { orderId: 'o_1', status: 'paid', customer: '[redacted]',
 //   items: [{ sku: 'A1', qty: 2, giftNote: '[redacted]' }], note: 'call [redacted]' }
 ```
+
+## Examples
+
+[`examples/`](./examples) holds one runnable script per adapter. Each sends the same data through without and with the allowlist and prints both:
+
+| Script | Shows |
+| --- | --- |
+| [`pino.ts`](./examples/pino.ts) | a log call and a child logger: unlisted keys, an e-mail in the message, a card number |
+| [`otel.ts`](./examples/otel.ts) | a server span with `url.full`, a SQL statement and a client IP, as the pipeline holds it and as it is exported |
+| [`sentry.ts`](./examples/sentry.ts) | an error event, a streamed database span and a `Sentry.logger` record, before and after the hooks; no DSN needed |
+
+The examples need Node 22.6 or newer, which can run TypeScript directly; the package itself supports Node 20.
+
+```sh
+pnpm install && pnpm build
+pnpm examples                    # all three
+node examples/pino.ts            # one, on Node 22.18+; on 22.6 to 22.17 add --experimental-strip-types
+```
+
+```text
+--- before
+{"level":30,"orderId":"o_1","email":"jane@example.com","taxId":"DE123456789","msg":"order placed for jane@example.com"}
+--- after
+{"level":30,"orderId":"o_1","email":"[redacted]","taxId":"[redacted]","msg":"order placed for [redacted]"}
+```
+
+A test runs every example and fails if anything it marks as personal data shows up after the allowlist.
 
 ## OpenTelemetry
 
@@ -384,7 +412,8 @@ Issues and pull requests are welcome at [github.com/devmaxxx/pii-allowlist](http
 ```sh
 pnpm install
 pnpm build       # tsdown, checked by publint
-pnpm test        # vitest
+pnpm test        # vitest, examples included (after a build)
+pnpm examples    # print each example's before and after
 pnpm lint
 pnpm typecheck
 ```
