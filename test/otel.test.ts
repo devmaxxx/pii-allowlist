@@ -209,3 +209,39 @@ describe('AllowlistSpanExporter: the resource', () => {
     expect(raw && allowlistSpan(raw, createAllowlist({ keys: [] })).resource.attributes).toEqual({ 'service.name': 'checkout' })
   })
 })
+
+describe('allowlistSpan: text inside allowlisted attributes', () => {
+  it('scrubs addresses out of surviving attribute strings, arrays and a non-HTTP span name', () => {
+    const { memory, provider } = exported(memory => new AllowlistSpanExporter(memory, {
+      allowlist: createAllowlist({ keys: [...DEFAULT_SPAN_ATTRIBUTES, 'tenant.tags'] }),
+    }))
+    provider.getTracer('test').startSpan(`send mail to ${EMAIL}`, {
+      attributes: { 'messaging.destination.name': `inbox of ${EMAIL}`, 'tenant.tags': ['vip', PHONE] },
+    }).end()
+
+    const [span] = memory.getFinishedSpans()
+    expect(span?.name).toBe('send mail to [redacted]')
+    expect(span?.attributes).toEqual({ 'messaging.destination.name': 'inbox of [redacted]', 'tenant.tags': ['vip', '[redacted]'] })
+  })
+})
+
+describe('AllowlistSpanExporter: a span it cannot copy', () => {
+  it('fails the export instead of forwarding the span unfiltered', () => {
+    const forwarded: unknown[] = []
+    const results: { code: number }[] = []
+    const exporter = new AllowlistSpanExporter({
+      export: spans => forwarded.push(...spans),
+      shutdown: async () => {},
+    })
+    const span = Object.defineProperty({}, 'attributes', {
+      get: () => {
+        throw new Error('hostile')
+      },
+    }) as ReadableSpan
+
+    exporter.export([span], result => results.push(result))
+
+    expect(forwarded).toEqual([])
+    expect(results).toMatchObject([{ code: 1 }])
+  })
+})

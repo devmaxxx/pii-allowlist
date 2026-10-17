@@ -1,18 +1,11 @@
+import type { TextPattern } from './text'
+import { compileTextPattern, DEFAULT_TEXT_PATTERNS } from './text'
+
 /** The placeholder a value takes when its key is not on the allowlist. */
 export const REDACTED = '[redacted]'
 
 /** What a reference back to one of its own ancestors is written as. */
 export const CIRCULAR = '[circular]'
-
-/**
- * Text shapes scrubbed from every string an allowlisted key carries: an e-mail address and an
- * E.164 phone number. A key on the list says its value is safe to log; these catch the message
- * somebody built by interpolating one into it anyway.
- */
-export const DEFAULT_TEXT_PATTERNS: readonly RegExp[] = [
-  /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}.-]{1,253}\.\p{L}{2,}/gu,
-  /\+\d{9,15}\b/g,
-]
 
 const DEFAULT_MAX_DEPTH = 8
 
@@ -36,7 +29,7 @@ export interface AllowlistOptions {
    * Patterns cut out of every string that survives the walk, replaced with {@link REDACTED}.
    * Defaults to {@link DEFAULT_TEXT_PATTERNS}; pass `[]` to keep strings verbatim.
    */
-  textPatterns?: Iterable<RegExp>
+  textPatterns?: Iterable<TextPattern>
   /**
    * Objects nested deeper than this are replaced whole, allowlisted or not. Defaults to 8; the
    * top-level record is depth 0.
@@ -76,7 +69,7 @@ export interface Allowlist {
 export function createAllowlist(options: AllowlistOptions): Allowlist {
   const keys = new Set(options.keys)
   const patterns = [...(options.patterns ?? [])].map(withoutStatefulFlags)
-  const textPatterns = [...(options.textPatterns ?? DEFAULT_TEXT_PATTERNS)].map(withGlobalFlag)
+  const textPatterns = [...(options.textPatterns ?? DEFAULT_TEXT_PATTERNS)].map(compileTextPattern)
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const redactValue = toRedactFn(options.redactWith)
 
@@ -86,8 +79,11 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
 
   function scrubText(text: string): string {
     let scrubbed = text
-    for (const pattern of textPatterns)
-      scrubbed = scrubbed.replace(pattern, REDACTED)
+    for (const { pattern, accept } of textPatterns) {
+      scrubbed = accept === undefined
+        ? scrubbed.replace(pattern, REDACTED)
+        : scrubbed.replace(pattern, match => accept(match) ? REDACTED : match)
+    }
     return scrubbed
   }
 
@@ -182,10 +178,6 @@ function withoutStatefulFlags(pattern: RegExp): RegExp {
   return new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''))
 }
 
-function withGlobalFlag(pattern: RegExp): RegExp {
-  return pattern.global ? pattern : new RegExp(pattern.source, `${pattern.flags}g`)
-}
-
 function isOpaque(value: object): boolean {
   return value instanceof Map
     || value instanceof Set
@@ -204,15 +196,23 @@ function recordFor(value: object): Record<string, unknown> {
   return value instanceof Error ? Object.create(null) as Record<string, unknown> : {}
 }
 
-/** An error's `name`, `message` and `stack` are not enumerable, so `Object.keys` misses them. */
+/**
+ * An error's `name`, `message` and `stack` are not enumerable, so `Object.keys` misses them; nor is
+ * the `cause` that `new Error(message, { cause })` sets, which is walked like any other key.
+ */
 function entriesOf(value: object): [string, unknown][] {
-  const own = Object.keys(value).map((key): [string, unknown] => [key, readOwn(value, key)])
+  const keys = Object.keys(value)
+  const own = keys.map((key): [string, unknown] => [key, readOwn(value, key)])
   if (!(value instanceof Error))
     return own
+  const cause: [string, unknown][] = Object.hasOwn(value, 'cause') && !keys.includes('cause')
+    ? [['cause', readOwn(value, 'cause')]]
+    : []
   return [
     ['type', readOwn(value, 'name')],
     ['message', readOwn(value, 'message')],
     ['stack', readOwn(value, 'stack')],
+    ...cause,
     ...own,
   ]
 }

@@ -15,6 +15,7 @@ export const DEFAULT_LOG_KEYS: readonly string[] = [
   'type',
   'message',
   'stack',
+  'cause',
   'code',
   'reqId',
   'method',
@@ -42,7 +43,7 @@ export interface LogFormatterOptions {
  * logged as `[redacted]`, subtree and all.
  *
  * Child-logger bindings and the message string do not pass through `formatters.log`; see
- * {@link createMessageSerializer} for the message.
+ * {@link allowlistChildBindings} and {@link createMessageSerializer}.
  *
  * @example
  * pino({ formatters: { log: createLogFormatter() } })
@@ -67,6 +68,41 @@ function withoutKeys(object: Record<string, unknown>, keys: ReadonlySet<string>)
   if (keys.size === 0)
     return object
   return Object.fromEntries(Object.entries(object).filter(([key]) => !keys.has(key)))
+}
+
+export interface ChildBindingsOptions {
+  /** Which binding keys are logged in clear. Defaults to {@link DEFAULT_LOG_KEYS}. */
+  allowlist?: Allowlist
+}
+
+/** The part of a pino logger this module touches, so no pino import is needed. */
+interface ChildFactory {
+  child: (bindings: Record<string, unknown>, ...rest: never[]) => unknown
+}
+
+/**
+ * Makes `logger.child(bindings)` walk its bindings like a log call's object, for this logger and
+ * every descendant. pino writes child bindings straight into each line: they skip
+ * `formatters.log`, and `formatters.bindings` sees only the base bindings. A child is created
+ * from its parent's prototype, so replacing `child` on the root reaches the whole tree.
+ *
+ * @example
+ * const logger = allowlistChildBindings(pino({ formatters: { log: createLogFormatter() } }))
+ * logger.child({ reqId, email }) // email is logged as '[redacted]'
+ */
+export function allowlistChildBindings<L extends ChildFactory>(logger: L, options: ChildBindingsOptions = {}): L {
+  const allowlist = options.allowlist ?? createAllowlist({ keys: DEFAULT_LOG_KEYS })
+  const child = logger.child
+  Object.defineProperty(logger, 'child', {
+    value(this: L, bindings: Record<string, unknown>, ...rest: never[]) {
+      // Not an object: let pino raise its own "missing bindings" error instead of walking it into `{}`.
+      const safe = typeof bindings === 'object' && bindings !== null ? allowlist.redactRecord(bindings) : bindings
+      return child.call(this, safe, ...rest)
+    },
+    writable: true,
+    configurable: true,
+  })
+  return logger
 }
 
 export interface MessageSerializerOptions {

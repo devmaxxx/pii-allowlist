@@ -1,39 +1,13 @@
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base'
 import type { Allowlist } from '../allowlist'
 import { createAllowlist } from '../allowlist'
+import { failedExport, pickScrubbed } from './attributes'
+import { DEFAULT_SPAN_ATTRIBUTES } from './semconv'
+
+export { DEFAULT_SPAN_ATTRIBUTES }
 
 type ExportCallback = Parameters<SpanExporter['export']>[1]
 type Resource = ReadableSpan['resource']
-
-/**
- * Span attributes that name a template, a code, a system or a count — never a value somebody
- * typed. Both the stable and the older semantic-convention names are listed. `url.*`,
- * `http.target`, `http.url`, `db.statement`, `db.query.text`, `client.address`,
- * `user_agent.original` and every `*.header.*` are absent on purpose: they carry query strings,
- * SQL literals and addresses.
- */
-export const DEFAULT_SPAN_ATTRIBUTES: readonly string[] = [
-  'http.request.method',
-  'http.method',
-  'http.route',
-  'http.response.status_code',
-  'http.status_code',
-  'network.protocol.version',
-  'server.address',
-  'server.port',
-  'db.system',
-  'db.system.name',
-  'db.operation',
-  'db.operation.name',
-  'db.name',
-  'db.namespace',
-  'messaging.system',
-  'messaging.destination.name',
-  'messaging.operation',
-  'messaging.operation.name',
-  'messaging.operation.type',
-  'error.type',
-]
 
 /**
  * Resource attributes that name the service and the SDK. `host.*`, `process.*` (command line,
@@ -81,11 +55,11 @@ export function safeSpanName(name: string, attributes: Readonly<Record<string, u
 }
 
 /**
- * A copy of `resource` carrying only the attributes `allowlist` names. `merge` filters its result
- * too, so nothing downstream can bring a dropped attribute back.
+ * A copy of `resource` carrying only the attributes `allowlist` names, text-scrubbed. `merge`
+ * filters its result too, so nothing downstream can bring a dropped attribute back.
  */
 export function allowlistResource(resource: Resource, allowlist: Allowlist = defaultResourceAllowlist): Resource {
-  const attributes = allowlist.pick(resource.attributes)
+  const attributes = pickScrubbed(resource.attributes, allowlist)
   return {
     attributes,
     ...(resource.schemaUrl === undefined ? {} : { schemaUrl: resource.schemaUrl }),
@@ -96,7 +70,8 @@ export function allowlistResource(resource: Resource, allowlist: Allowlist = def
 
 /**
  * A copy of `span` carrying only what the allowlists name: attributes not on `allowlist` are
- * dropped and counted in `droppedAttributesCount`; resource attributes not on `resourceAllowlist`
+ * dropped and counted in `droppedAttributesCount`, and the strings of the rest, like the name,
+ * lose the allowlist's text patterns; resource attributes not on `resourceAllowlist`
  * are dropped; events (recorded exceptions included) are dropped; links keep their span context
  * and lose their attributes; the status keeps its code and loses its message; the name goes
  * through {@link safeSpanName}.
@@ -106,11 +81,11 @@ export function allowlistSpan(
   allowlist: Allowlist,
   resourceAllowlist: Allowlist = defaultResourceAllowlist,
 ): ReadableSpan {
-  const attributes = allowlist.pick(span.attributes)
+  const attributes = pickScrubbed(span.attributes, allowlist)
   const removed = Object.keys(span.attributes).length - Object.keys(attributes).length
 
   return {
-    name: safeSpanName(span.name, attributes),
+    name: allowlist.scrubText(safeSpanName(span.name, attributes)),
     kind: span.kind,
     spanContext: () => span.spanContext(),
     ...(span.parentSpanContext === undefined ? {} : { parentSpanContext: span.parentSpanContext }),
@@ -147,7 +122,15 @@ export class AllowlistSpanExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: ExportCallback): void {
-    this.next.export(spans.map(span => allowlistSpan(span, this.allowlist, this.resourceAllowlist)), resultCallback)
+    let copies: ReadableSpan[]
+    try {
+      copies = spans.map(span => allowlistSpan(span, this.allowlist, this.resourceAllowlist))
+    }
+    catch (error) {
+      resultCallback(failedExport(error))
+      return
+    }
+    this.next.export(copies, resultCallback)
   }
 
   shutdown(): Promise<void> {

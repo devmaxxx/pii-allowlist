@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.23.0",
   "description": "Allowlist, don't denylist: keep PII out of logs, traces and error reports. Zero-dependency core with pino, OpenTelemetry and Sentry adapters",
-  "author": "arenuzzz",
+  "author": "Maksym Synenko (https://github.com/devmaxxx)",
   "license": "MIT",
   "homepage": "https://github.com/devmaxxx/pii-allowlist#readme",
   "repository": {
@@ -30,6 +30,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./otel": "./dist/otel.js",
+    "./otel-logs": "./dist/otel-logs.js",
     "./pino": "./dist/pino.js",
     "./sentry": "./dist/sentry.js",
     "./package.json": "./package.json"
@@ -51,13 +52,18 @@
     "lint": "eslint .",
     "typecheck": "tsc",
     "test": "vitest run",
+    "examples": "node --experimental-strip-types --no-warnings examples/pino.ts && node --experimental-strip-types --no-warnings examples/otel.ts && node --experimental-strip-types --no-warnings examples/sentry.ts",
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {
+    "@opentelemetry/sdk-logs": ">=0.200.0",
     "@opentelemetry/sdk-trace-base": ">=2.0.0",
     "pino": ">=8.0.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/sdk-logs": {
+      "optional": true
+    },
     "@opentelemetry/sdk-trace-base": {
       "optional": true
     },
@@ -68,7 +74,9 @@
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
     "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.223.0",
     "@opentelemetry/resources": "^2.12.0",
+    "@opentelemetry/sdk-logs": "^0.223.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@sentry/core": "^11.8.0",
     "@types/node": "^22.20.5",
