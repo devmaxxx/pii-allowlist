@@ -70,7 +70,7 @@ export function allowlistSpan(span: ReadableSpan, allowlist: Allowlist): Readabl
   const removed = Object.keys(span.attributes).length - Object.keys(attributes).length
 
   return {
-    name: safeSpanName(span.name, span.attributes),
+    name: safeSpanName(span.name, attributes),
     kind: span.kind,
     spanContext: () => span.spanContext(),
     ...(span.parentSpanContext === undefined ? {} : { parentSpanContext: span.parentSpanContext }),

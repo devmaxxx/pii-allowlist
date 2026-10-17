@@ -40,9 +40,11 @@ export function createPathRedactor(options: PathRedactorOptions = {}): PathRedac
   }
 }
 
+/** Also drops `user:password@` credentials from an absolute URL's authority. */
 function withoutQuery(url: string): string {
   const end = url.search(/[?#]/)
-  return end === -1 ? url : url.slice(0, end)
+  const bare = end === -1 ? url : url.slice(0, end)
+  return bare.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/@\s]*@/i, '$1')
 }
 
 /**

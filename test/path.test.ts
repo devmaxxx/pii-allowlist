@@ -55,3 +55,9 @@ describe('createPathRedactor', () => {
     expect(() => createPathRedactor({ tokens: ['/reset'] })).toThrow(/no :token segment/)
   })
 })
+
+describe('createPathRedactor: credentials', () => {
+  it('drops user:password@ from an absolute URL', () => {
+    expect(createPathRedactor()('https://user:pw@app.example/a?x=1')).toBe('https://app.example/a')
+  })
+})

@@ -10,7 +10,7 @@ export const CIRCULAR = '[circular]'
  * somebody built by interpolating one into it anyway.
  */
 export const DEFAULT_TEXT_PATTERNS: readonly RegExp[] = [
-  /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.\p{L}{2,}/gu,
+  /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}.-]{1,253}\.\p{L}{2,}/gu,
   /\+\d{9,15}\b/g,
 ]
 
@@ -124,13 +124,7 @@ export function createAllowlist(options: AllowlistOptions): Allowlist {
   }
 
   function redact(value: unknown): unknown {
-    if (Array.isArray(value))
-      return value.map(item => redact(item))
-    if (value === null || typeof value !== 'object' || value instanceof Date)
-      return walk('', value, [])
-    if (isOpaque(value))
-      return redactValue('', value)
-    return walkEntries(value, [value])
+    return walk('', value, [])
   }
 
   return {

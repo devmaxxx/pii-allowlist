@@ -65,6 +65,16 @@ function scrubbersOf(options: SentryScrubOptions): Scrubbers {
   }
 }
 
+function withRedactedUrls(record: Record<string, unknown>, redactPath: PathRedactor): Record<string, unknown> {
+  const copy = { ...record }
+  for (const key of URL_KEYS) {
+    const value = copy[key]
+    if (typeof value === 'string')
+      copy[key] = redactPath(value)
+  }
+  return copy
+}
+
 /**
  * A breadcrumb as it may be reported. Console breadcrumbs (`category: 'console'`) and debug ones
  * lose their message and data whole, because they hold whatever the app logged. Any other keeps
@@ -77,13 +87,7 @@ function scrubBreadcrumb<B extends BreadcrumbLike>(crumb: B, scrubbers: Scrubber
   const { allowlist, redactPath } = scrubbers
   const next: B = { ...crumb }
   if (crumb.data !== undefined) {
-    const data = { ...crumb.data }
-    for (const key of URL_KEYS) {
-      const value = data[key]
-      if (typeof value === 'string')
-        data[key] = redactPath(value)
-    }
-    next.data = allowlist.redactRecord(data)
+    next.data = allowlist.redactRecord(withRedactedUrls(crumb.data, redactPath))
   }
   if (typeof crumb.message === 'string')
     next.message = allowlist.scrubText(redactPath(crumb.message))
@@ -133,7 +137,7 @@ export function createBeforeSend(
       next.request = scrubRequest(event.request, redactPath)
     delete next.user
     if (event.extra !== undefined)
-      next.extra = allowlist.redactRecord(event.extra)
+      next.extra = allowlist.redactRecord(withRedactedUrls(event.extra, redactPath))
     if (event.breadcrumbs !== undefined)
       next.breadcrumbs = event.breadcrumbs.map(crumb => scrubBreadcrumb(crumb, scrubbers))
     if (typeof event.transaction === 'string')

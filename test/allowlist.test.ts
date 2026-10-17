@@ -183,3 +183,19 @@ describe('createAllowlist: pick', () => {
     })
   })
 })
+
+describe('createAllowlist: regressions', () => {
+  it('turns a top-level self-referencing array into CIRCULAR instead of overflowing the stack', () => {
+    const items: unknown[] = []
+    items.push(items)
+
+    expect(createAllowlist({ keys: [] }).redact(items)).toEqual([CIRCULAR])
+  })
+
+  it('scrubs a long run of letters in linear time', () => {
+    const started = Date.now()
+    createAllowlist({ keys: [] }).scrubText('a'.repeat(50_000))
+
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+})

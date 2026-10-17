@@ -133,3 +133,11 @@ describe('the Sentry SDK types', () => {
     expect(options.beforeBreadcrumb?.(crumb)).toEqual({ category: 'fetch', data: { url: '/p' } })
   })
 })
+
+describe('createBeforeSend: extra urls', () => {
+  it('drops the query string of an allowlisted url in extra', () => {
+    const event = createBeforeSend()({ extra: { url: 'https://app.example/cb?code=SECRET' } })
+
+    expect(event.extra).toEqual({ url: 'https://app.example/cb' })
+  })
+})
