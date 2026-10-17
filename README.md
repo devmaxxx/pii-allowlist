@@ -1,61 +1,80 @@
+<div align="center">
+
 # pii-allowlist
 
-Default-deny PII filtering for logs, traces and error reports. A value leaves your process only when its key is on a list you wrote; everything else becomes `[redacted]`.
+**Allowlist, don't denylist: keep PII out of logs, traces and error reports.**
 
-One zero-dependency core, plus thin adapters for [OpenTelemetry](https://opentelemetry.io/), [pino](https://getpino.io/) and [Sentry](https://sentry.io/).
+[![npm version](https://img.shields.io/npm/v/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
+[![npm downloads](https://img.shields.io/npm/dm/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
+[![CI](https://github.com/arenuzzz/pii-allowlist/actions/workflows/ci.yml/badge.svg)](https://github.com/arenuzzz/pii-allowlist/actions/workflows/ci.yml)
+[![types](https://img.shields.io/npm/types/pii-allowlist)](https://www.npmjs.com/package/pii-allowlist)
+[![core dependencies](https://img.shields.io/badge/core%20dependencies-0-brightgreen)](./package.json)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/pii-allowlist)](https://bundlephobia.com/package/pii-allowlist)
+[![license](https://img.shields.io/npm/l/pii-allowlist)](./LICENSE)
 
-## Why an allowlist
+</div>
 
-A denylist (`redact: ['password', '*.email']`) censors the keys somebody foresaw. Instrumentation and application code write keys nobody foresaw: `url.full` with the query string, `db.statement` with a phone number in a `WHERE`, a `customer` object logged whole, a new `taxId` field added next quarter. A denylist misses each of them silently, and a leak is invisible until someone reads the logs.
+A value leaves your process only when its key is on a list you wrote. Everything else becomes `[redacted]`. One dependency-free core, plus thin adapters for [OpenTelemetry](https://opentelemetry.io/), [pino](https://getpino.io/) and [Sentry](https://sentry.io/).
 
-An allowlist fails the other way. A key you forgot is redacted, you notice the `[redacted]` in a dashboard, and you add the key. The list has to know only what your dashboards and alerts read, which is short and stable.
+## Why allowlist
+
+A denylist (`redact: ['email', 'password']`) censors the keys somebody foresaw. Code writes keys nobody foresaw: `url.full` with a query string, `db.statement` with a phone number in a `WHERE`, a `customer` object logged whole, a `taxId` field added next quarter. A denylist misses each one silently, and the leak stays invisible until someone reads the logs.
+
+An allowlist fails the other way. A key you forgot is redacted, you see `[redacted]` in a dashboard, and you add the key. The list only has to name what your dashboards and alerts read, which is short and stable.
+
+The same pino call, `logger.info({ userId, email, taxId, shippingAddress }, 'signup')`:
+
+| Denylist: `pino({ redact: ['email', 'password'] })` | Allowlist: `createLogFormatter(...)` with `userId` added |
+| --- | --- |
+| `"userId":"u_9"` | `"userId":"u_9"` |
+| `"email":"[Redacted]"` | `"email":"[redacted]"` |
+| `"taxId":"DE123456789"` | `"taxId":"[redacted]"` |
+| `"shippingAddress":"1 Main St"` | `"shippingAddress":"[redacted]"` |
+
+## Features
+
+- **Default deny.** A key not named by `keys` or `patterns` is redacted, subtree and all, at every depth.
+- **Text scrubbing.** E-mail addresses and E.164 phone numbers are cut out of every string that survives, so an allowlisted `message` built by interpolation stays clean.
+- **URL redaction.** Query strings and fragments are always dropped; secret path segments (`/reset/:token`) are replaced.
+- **Safe walk.** Inputs are never mutated; cycles become `[circular]`; depth is capped; errors are walked as `{ type, message, stack, ... }`; maps, sets and buffers are replaced whole; a `__proto__` key is copied as data.
+- **Adapters** for an OpenTelemetry `SpanExporter`, pino `formatters.log` and serializers, and Sentry `beforeSend` / `beforeBreadcrumb`.
+- **Zero dependencies in the core.** Each adapter's framework is an optional peer. ESM only, typed, `sideEffects: false`.
 
 ## Install
 
 ```sh
+npm install pii-allowlist
 pnpm add pii-allowlist
+yarn add pii-allowlist
+bun add pii-allowlist
 ```
 
-ESM only, Node 20+ (the core and the Sentry adapter also run in browsers). Each adapter's framework is an optional peer dependency: install only what you use.
+Requires Node 20 or newer. The build is platform-neutral. Add the peer for each adapter you use:
 
-| Entry | For | Peer dependency |
+| Entry point | For | Optional peer dependency |
 | --- | --- | --- |
 | `pii-allowlist` | the core | none |
 | `pii-allowlist/otel` | trace exporters | `@opentelemetry/sdk-trace-base` >= 2 |
 | `pii-allowlist/pino` | log lines | `pino` >= 8 |
-| `pii-allowlist/sentry` | error events and breadcrumbs | `@sentry/core` >= 8 (any Sentry SDK) |
+| `pii-allowlist/sentry` | error events and breadcrumbs | `@sentry/core` >= 8 (installed by any Sentry SDK) |
 
-## Core
+## Quick start
 
 ```ts
-import { createAllowlist, createPathRedactor } from 'pii-allowlist'
+import { createAllowlist } from 'pii-allowlist'
 
-const allowlist = createAllowlist({
-  keys: ['orderId', 'status', 'items', 'sku', 'qty'],
-  patterns: [/Id$/], // any key ending in "Id"
-})
+const allowlist = createAllowlist({ keys: ['orderId', 'status', 'items', 'sku', 'qty', 'note'] })
 
 allowlist.redact({
   orderId: 'o_1',
-  customer: { email: 'jane@example.com' },
+  status: 'paid',
+  customer: { email: 'jane@example.com', phone: '+14155550123' },
   items: [{ sku: 'A1', qty: 2, giftNote: 'for Jane' }],
+  note: 'call jane@example.com',
 })
-// { orderId: 'o_1', customer: '[redacted]', items: [{ sku: 'A1', qty: 2, giftNote: '[redacted]' }] }
-
-const redactPath = createPathRedactor({ tokens: ['/reset/:token', '/invite/:token/accept'] })
-redactPath('https://app.example/en/reset/s3cr3t?email=jane@example.com')
-// 'https://app.example/en/reset/[token]'
+// { orderId: 'o_1', status: 'paid', customer: '[redacted]',
+//   items: [{ sku: 'A1', qty: 2, giftNote: '[redacted]' }], note: 'call [redacted]' }
 ```
-
-`createAllowlist(options)`:
-
-- `keys`: exact key names allowed at any depth.
-- `patterns`: regular expressions; a key matching any of them is allowed.
-- `redactWith`: the placeholder (default `'[redacted]'`), or `(key, value) => replacement`.
-- `textPatterns`: patterns cut out of every string that survives (default: e-mail addresses and E.164 phone numbers; `[]` to turn off).
-- `maxDepth`: objects nested deeper are replaced whole (default 8).
-
-It returns `{ has, redact, redactRecord, pick, scrubText }`. Nothing is mutated; circular references become `'[circular]'`; errors are walked as `{ type, message, stack, ...ownProperties }`; maps, sets and binary buffers are replaced whole.
 
 ## OpenTelemetry
 
@@ -67,7 +86,22 @@ import { AllowlistSpanExporter } from 'pii-allowlist/otel'
 const processor = new BatchSpanProcessor(new AllowlistSpanExporter(new OTLPTraceExporter()))
 ```
 
-Each exported span keeps only allowlisted attributes (default: `DEFAULT_SPAN_ATTRIBUTES`, the HTTP method, route and status, database and messaging system and operation, `error.type`). Events, including recorded exceptions, are dropped; links lose their attributes; the status loses its message; an HTTP span is renamed `METHOD /route/{template}`, and any other span name loses its query string. Pass `{ allowlist }` as the second argument to choose the attributes.
+The wrapped exporter receives a copy of each span; the spans the rest of the pipeline holds are untouched. In the copy:
+
+- only allowlisted attributes remain (default `DEFAULT_SPAN_ATTRIBUTES`); the rest are counted in `droppedAttributesCount`;
+- events, including recorded exceptions, are dropped; links lose their attributes; the status loses its message;
+- an HTTP span is renamed `METHOD /route/{template}` (or `METHOD` when no route matched); any other name loses its query string.
+
+To allow more attributes:
+
+```ts
+import { createAllowlist } from 'pii-allowlist'
+import { AllowlistSpanExporter, DEFAULT_SPAN_ATTRIBUTES } from 'pii-allowlist/otel'
+
+const allowlisted = new AllowlistSpanExporter(exporter, {
+  allowlist: createAllowlist({ keys: [...DEFAULT_SPAN_ATTRIBUTES, 'tenant.id'] }),
+})
+```
 
 ## pino
 
@@ -78,27 +112,30 @@ import pino from 'pino'
 
 const logger = pino({
   formatters: {
-    log: createLogFormatter({
-      allowlist: createAllowlist({ keys: [...DEFAULT_LOG_KEYS, 'orderId'] }),
-    }),
+    log: createLogFormatter({ allowlist: createAllowlist({ keys: [...DEFAULT_LOG_KEYS, 'orderId'] }) }),
   },
   serializers: { msg: createMessageSerializer() },
 })
 
-logger.info({ orderId: 'o_1', email: 'jane@example.com' }, 'order placed')
-// {"level":30,...,"orderId":"o_1","email":"[redacted]","msg":"order placed"}
+logger.info({ orderId: 'o_1', email: 'jane@example.com' }, 'order placed for jane@example.com')
+// {"level":30,...,"orderId":"o_1","email":"[redacted]","msg":"order placed for [redacted]"}
 ```
 
-pino calls `formatters.log` before its serializers, so with pino-http the `req` and `res` keys are still raw Node objects there. To log them, hand them through to serializers that reduce them:
+With pino-http, pino calls `formatters.log` before its serializers, so `req` and `res` are still raw Node objects there. Pass them through to serializers that reduce them:
 
 ```ts
+import { createPathRedactor } from 'pii-allowlist'
 import { createLogFormatter, createRequestSerializer, responseSerializer } from 'pii-allowlist/pino'
 
 const options = {
   formatters: { log: createLogFormatter({ passThrough: ['req', 'res'] }) },
-  serializers: { req: createRequestSerializer(), res: responseSerializer },
+  serializers: {
+    req: createRequestSerializer({ redactPath: createPathRedactor({ tokens: ['/reset/:token'] }) }),
+    res: responseSerializer,
+  },
 }
-// req is logged as { id, method, url } with the query string replaced by "?[redacted]"
+// req: { id: 1, method: 'GET', url: '/en/reset/[token]?[redacted]' }
+// res: { statusCode: 200 }
 ```
 
 ## Sentry
@@ -117,15 +154,120 @@ Sentry.init({
 })
 ```
 
-`beforeSend` keeps only the request's method and redacted URL, drops `user`, keeps allowlisted `extra` keys (default: `DEFAULT_SENTRY_KEYS`), path-redacts the transaction name and breadcrumb URLs, and scrubs e-mail addresses and phone numbers out of the message and exception values. Console and debug breadcrumbs lose their message and data. The helpers are typed structurally, so they fit `@sentry/node`, `@sentry/browser`, `@sentry/nextjs` and the rest.
+`redactPath` turns `https://app.example/en/reset/s3cr3t?email=jane@example.com` into `https://app.example/en/reset/[token]`. A template matches anywhere in the URL, so an origin, an `/api` prefix or a locale in front of it does not hide the token; `*` matches any one segment and keeps it.
+
+`beforeSend` returns a scrubbed copy of the event:
+
+- `request` keeps only its method and path-redacted URL; body, headers, cookies, query string and env are dropped;
+- `user` is dropped;
+- `extra` keeps allowlisted keys only (default `DEFAULT_SENTRY_KEYS`), walked deep;
+- the transaction name and breadcrumb `url`, `from`, `to` and messages are path-redacted;
+- e-mail addresses and phone numbers are scrubbed out of the message and exception values.
+
+Console and debug breadcrumbs lose their message and data. Both helpers are typed structurally, so they fit `@sentry/node`, `@sentry/browser`, `@sentry/nextjs` and the other SDKs without importing one.
+
+## API
+
+### `pii-allowlist`
+
+**`createAllowlist(options): Allowlist`**
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `keys` | `Iterable<string>` | required | Keys allowed at any depth, matched exactly. |
+| `patterns` | `Iterable<RegExp>` | `[]` | A key matching any pattern is allowed, e.g. `/Id$/`. |
+| `redactWith` | `string \| (key, value) => unknown` | `'[redacted]'` | What a non-allowlisted value becomes. |
+| `textPatterns` | `Iterable<RegExp>` | `DEFAULT_TEXT_PATTERNS` | Cut out of every surviving string; `[]` keeps strings verbatim. |
+| `maxDepth` | `number` | `8` | Objects nested deeper are replaced whole. The top-level record is depth 0. |
+
+The returned `Allowlist` is pure; no method mutates its input.
+
+| Method | Returns |
+| --- | --- |
+| `has(key)` | whether a value under `key` may leave the process |
+| `redact(value)` | a deep copy with every non-allowlisted property replaced; array items inherit their parent key's verdict |
+| `redactRecord(record)` | `redact` for a record, typed as one |
+| `pick(record)` | only the allowlisted top-level entries, unwalked |
+| `scrubText(text)` | `text` with every text pattern replaced by `[redacted]` |
+
+**`createPathRedactor(options?): (url: string) => string`** drops the query string and fragment, then replaces `:token` segments.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `tokens` | `string[]` | `[]` | Route templates with a `:token` segment, e.g. `'/invite/:token/accept'`. A template without one throws. |
+| `placeholder` | `string` | `'[token]'` | What a token segment becomes. |
+
+Constants: `REDACTED` (`'[redacted]'`), `CIRCULAR` (`'[circular]'`), `DEFAULT_TEXT_PATTERNS`.
+
+### `pii-allowlist/otel`
+
+| Export | |
+| --- | --- |
+| `new AllowlistSpanExporter(next, { allowlist? })` | `SpanExporter` that forwards allowlisted span copies to `next`, plus `shutdown` and `forceFlush`. |
+| `allowlistSpan(span, allowlist)` | The copy of one span the exporter forwards. |
+| `safeSpanName(name, attributes)` | The name a span is exported with. |
+| `DEFAULT_SPAN_ATTRIBUTES` | Default attribute keys. |
+
+### `pii-allowlist/pino`
+
+| Export | Options | |
+| --- | --- | --- |
+| `createLogFormatter(options?)` | `allowlist` (default `DEFAULT_LOG_KEYS`), `passThrough` (top-level keys left for serializers, default none) | `formatters.log` |
+| `createMessageSerializer(options?)` | `allowlist` (whose text patterns apply) | serializer for `msg` |
+| `createRequestSerializer(options?)` | `redactPath`, `allowlist` | `req` serializer: `{ id, method, url }`, query shown as `?[redacted]` |
+| `responseSerializer` | | `res` serializer: `{ statusCode }` |
+| `DEFAULT_LOG_KEYS` | | Default log keys. |
+
+### `pii-allowlist/sentry`
+
+| Export | Options | |
+| --- | --- | --- |
+| `createBeforeSend(options?)` | `allowlist` (default `DEFAULT_SENTRY_KEYS`), `redactPath` (default drops query and fragment) | `beforeSend` |
+| `createBeforeBreadcrumb(options?)` | same | `beforeBreadcrumb` |
+| `DEFAULT_SENTRY_KEYS` | | Default breadcrumb `data` and event `extra` keys. |
+
+### Defaults
+
+| List | Contents | Left out on purpose |
+| --- | --- | --- |
+| `DEFAULT_TEXT_PATTERNS` | e-mail addresses, E.164 phone numbers (`+` and 9 to 15 digits) | |
+| `DEFAULT_SPAN_ATTRIBUTES` | HTTP method, route, status code, protocol version; `server.address`/`port`; `db.system`, operation, name/namespace; `messaging.system`, destination name, operation; `error.type`. Stable and older semantic-convention names. | `url.*`, `http.target`, `http.url`, `db.statement`, `db.query.text`, `client.address`, `user_agent.original`, headers |
+| `DEFAULT_LOG_KEYS` | `err`, `error`, `type`, `message`, `stack`, `code`, `reqId`, `method`, `statusCode`, `responseTime`, `durationMs`, `count`, `event` | `name`, `url` |
+| `DEFAULT_SENTRY_KEYS` | `method`, `url`, `from`, `to`, `status_code`, `request_body_size`, `response_body_size` | request bodies |
+
+## Compared with
+
+| | Model | Keys nobody listed | Runs |
+| --- | --- | --- | --- |
+| **pii-allowlist** | allowlist | redacted | in process, before export |
+| pino `redact` | denylist of paths | logged in clear | in process, pino only |
+| [fast-redact](https://github.com/davidmarkclements/fast-redact) | denylist of paths | logged in clear | in process |
+| OTel Collector attribute processors | per-key rules you configure | depends on the rules | in the Collector, after the data has left the process |
+| Sentry `sendDefaultPii: false` | the SDK skips some data it would collect itself | your own `extra`, breadcrumbs and messages are sent as written | in the SDK |
+
+A denylist is the better fit when the shape of every record is known and fixed. pii-allowlist targets the case where it is not.
 
 ## Limits
 
-- **Keys, not values.** An allowlisted key carries whatever value it is given. `textPatterns` catch e-mail addresses and phone numbers in allowlisted strings; they cannot recognise a name, an address or a national ID number. Keep free-text keys off the list, or add patterns for your own formats.
-- **pino bindings are not walked.** `formatters.log` sees the object passed to each log call, not the bindings of `logger.child({...})`. Keep personal data out of bindings, or filter them with `formatters.bindings`.
-- **Sentry `tags` and `contexts` are not walked**, because the SDK fills them with runtime and trace data. Do not put personal data in tags.
-- **Span resources are kept.** Resource attributes describe the process (service name, host), not a request.
-- **Text scrubbing is best effort.** It is a second line of defence for strings that are already allowlisted, not a substitute for the list.
+- **Keys, not values.** An allowlisted key carries whatever value it is given. The default text patterns catch only e-mail addresses and E.164 phone numbers; they cannot recognise a name, a street address or a national ID. Keep free-text keys off the list, or add `textPatterns` for your own formats.
+- **Patterns are broad.** `/Id$/` also admits `taxId`. Prefer exact keys.
+- **Depth cap.** Objects nested deeper than `maxDepth` (default 8) are replaced whole, allowlisted or not.
+- **pino bindings are not walked.** `formatters.log` sees each log call's object, not `logger.child({...})` bindings. Keep personal data out of bindings, or filter them with `formatters.bindings`.
+- **Sentry `tags` and `contexts` are not walked**, because the SDK fills them with runtime and trace data.
+- **Span resources are kept.** They describe the process (service name, host), not a request.
+- **Node 20 is untested in CI.** The package declares Node >= 20; CI runs Node 22 and 24 on Linux, macOS and Windows.
+
+## Contributing
+
+Issues and pull requests are welcome at [github.com/arenuzzz/pii-allowlist](https://github.com/arenuzzz/pii-allowlist).
+
+```sh
+pnpm install
+pnpm build       # tsdown, checked by publint
+pnpm test        # vitest
+pnpm lint
+pnpm typecheck
+```
 
 ## License
 
